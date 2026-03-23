@@ -20,8 +20,9 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "@types/nodemailer": "^7.0.11",
+    "@types/debug": "^4.1.13",
     "@types/node": "^20.0.0",
+    "@types/nodemailer": "^7.0.11",
     "typescript": "^5.0.0"
   },
   "publishConfig": {
