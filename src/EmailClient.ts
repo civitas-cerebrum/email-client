@@ -65,7 +65,6 @@ export class EmailClient {
 
                 const result = this.applyFilters(candidates, filters);
                 if (result.length > 0) {
-                    await client.logout();
                     return result[result.length - 1];
                 }
 
@@ -73,11 +72,9 @@ export class EmailClient {
                 await new Promise(resolve => setTimeout(resolve, interval));
             }
 
-            await client.logout();
             throw new Error(`No email matching criteria found within ${timeout}ms. Searched in "${mailbox}" for: ${this.formatFilterSummary(filters)}`);
-        } catch (error) {
+        } finally {
             try { await client.logout(); } catch { /* already disconnected */ }
-            throw error;
         }
     }
 
@@ -103,7 +100,6 @@ export class EmailClient {
                 const results = this.applyFilters(candidates, filters);
                 if (results.length > 0) {
                     log('Found %d matching email(s)', results.length);
-                    await client.logout();
                     return results;
                 }
 
@@ -111,11 +107,9 @@ export class EmailClient {
                 await new Promise(resolve => setTimeout(resolve, interval));
             }
 
-            await client.logout();
             throw new Error(`No emails matching criteria found within ${timeout}ms. Searched in "${mailbox}" for: ${this.formatFilterSummary(filters)}`);
-        } catch (error) {
+        } finally {
             try { await client.logout(); } catch { /* already disconnected */ }
-            throw error;
         }
     }
 
@@ -157,7 +151,7 @@ export class EmailClient {
     // ─── Public filtering API ────────────────────────────────────────
 
     applyFilters(candidates: ReceivedEmail[], filters: EmailFilter[]): ReceivedEmail[] {
-        const stringFilters = filters.filter(f => f.type !== EmailFilterType.SINCE);
+        const stringFilters = filters.filter(f => f.type !== EmailFilterType.SINCE && f.type !== EmailFilterType.TO);
         if (stringFilters.length === 0) return candidates;
 
         const exactMatches = candidates.filter(email => this.matchesAllFilters(email, stringFilters, true));
@@ -290,15 +284,16 @@ export class EmailClient {
     }
 
     extractHtmlFromSource(source: string): string {
-        const htmlMatch = source.match(
-            /Content-Type:\s*text\/html[\s\S]*?\r?\n\r?\n([\s\S]*?)(?:\r?\n--|\r?\n\.\r?\n|$)/i
+        const sectionMatch = source.match(
+            /(Content-Type:\s*text\/html[^\r\n]*(?:\r?\n(?![\r\n])[^\r\n]*)*)\r?\n\r?\n([\s\S]*?)(?:\r?\n--|\r?\n\.\r?\n|$)/i
         );
-        if (htmlMatch) {
-            let content = htmlMatch[1];
-            if (source.match(/Content-Transfer-Encoding:\s*base64/i)) {
+        if (sectionMatch) {
+            const headers = sectionMatch[1];
+            let content = sectionMatch[2];
+            if (/Content-Transfer-Encoding:\s*base64/i.test(headers)) {
                 try { content = Buffer.from(content.replace(/\s/g, ''), 'base64').toString('utf-8'); } catch { /* not base64 */ }
             }
-            if (source.match(/Content-Transfer-Encoding:\s*quoted-printable/i)) {
+            if (/Content-Transfer-Encoding:\s*quoted-printable/i.test(headers)) {
                 content = content
                     .replace(/=\r?\n/g, '')
                     .replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
@@ -309,13 +304,19 @@ export class EmailClient {
     }
 
     extractTextFromSource(source: string): string {
-        const textMatch = source.match(
-            /Content-Type:\s*text\/plain[\s\S]*?\r?\n\r?\n([\s\S]*?)(?:\r?\n--|\r?\n\.\r?\n|$)/i
+        const sectionMatch = source.match(
+            /(Content-Type:\s*text\/plain[^\r\n]*(?:\r?\n(?![\r\n])[^\r\n]*)*)\r?\n\r?\n([\s\S]*?)(?:\r?\n--|\r?\n\.\r?\n|$)/i
         );
-        if (textMatch) {
-            let content = textMatch[1];
-            if (source.match(/Content-Transfer-Encoding:\s*base64/i)) {
+        if (sectionMatch) {
+            const headers = sectionMatch[1];
+            let content = sectionMatch[2];
+            if (/Content-Transfer-Encoding:\s*base64/i.test(headers)) {
                 try { content = Buffer.from(content.replace(/\s/g, ''), 'base64').toString('utf-8'); } catch { /* not base64 */ }
+            }
+            if (/Content-Transfer-Encoding:\s*quoted-printable/i.test(headers)) {
+                content = content
+                    .replace(/=\r?\n/g, '')
+                    .replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
             }
             return content;
         }

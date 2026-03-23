@@ -38,6 +38,9 @@ jobs:
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
           RECEIVER_PASSWORD: ${{ secrets.RECEIVER_PASSWORD }}
 
+      - name: 📝 Check Types
+        run: npx tsc --noEmit
+
       - name: 📦 Publish Package
         run: npm publish --access public --provenance
         env:
