@@ -1,0 +1,45 @@
+{
+  "name": "@civitas-cerebrum/email-client",
+  "version": "0.0.1",
+  "description": "A generic SMTP/IMAP email client for test automation. Send, receive, search, and clean emails with composable filters.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
+    "test": "npx playwright test",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "debug": "^4.4.3",
+    "imapflow": "^1.2.16",
+    "nodemailer": "^8.0.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/nodemailer": "^7.0.11",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Umutayb/email-client.git"
+  },
+  "author": "Umut Ay Bora",
+  "license": "MIT",
+  "keywords": [
+    "email",
+    "smtp",
+    "imap",
+    "nodemailer",
+    "test-automation",
+    "email-filter"
+  ]
+}
