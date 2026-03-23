@@ -7,7 +7,10 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc",
-    "test": "npx playwright test",
+    "test": "npx playwright test --project=unit",
+    "test:e2e": "npx playwright test --project=e2e",
+    "test:all": "npx playwright test --project=unit --project=e2e",
+    "test:coverage": "npx playwright test --project=coverage",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -16,13 +19,16 @@
   "dependencies": {
     "debug": "^4.4.3",
     "imapflow": "^1.2.16",
+    "mailparser": "^3.9.5",
     "nodemailer": "^8.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/debug": "^4.1.13",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^20.0.0",
     "@types/nodemailer": "^7.0.11",
+    "dotenv": "^17.3.1",
     "typescript": "^5.0.0"
   },
   "publishConfig": {
