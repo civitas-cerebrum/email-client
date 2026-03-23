@@ -2,7 +2,6 @@ import { test, expect } from '@playwright/test';
 import { EmailFilterType, EmailFilter, EmailCredentials, ReceivedEmail } from '../src/types';
 import { EmailClient } from '../src/EmailClient';
 import { generateApiCoverage } from '../src/index copy'
-
 const dummyCredentials: EmailCredentials = {
     senderEmail: 'sender@test.com',
     senderPassword: 'pass',
@@ -38,7 +37,7 @@ test.describe('EmailClient Unit Tests', () => {
 
         // Output to console
         console.log(result.report);
-         test('should throw an error if recipient "to" is missing', async () => {
+        test('should throw an error if recipient "to" is missing', async () => {
             await expect(
                 emailClient.send({ subject: 'Test', text: 'Hello' } as any)
             ).rejects.toThrow();
