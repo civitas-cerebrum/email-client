@@ -31,7 +31,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Umutayb/email-client.git"
+    "url": "git+https://github.com/civitas-cerebrum/email-client.git"
   },
   "author": "Umut Ay Bora",
   "license": "MIT",
