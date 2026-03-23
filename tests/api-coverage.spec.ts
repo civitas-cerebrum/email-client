@@ -1,152 +1,211 @@
-/**
- * API Coverage Report
- *
- * Programmatically inspects the EmailClient public API, then scans
- * the test files to report which methods are exercised and which are not.
- *
- * Run:  npx playwright test tests/api-coverage.spec.ts
- * View: cat api-coverage-report.txt
- */
-
-import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
-import { EmailClient } from '../src/EmailClient';
+import * as ts from 'typescript';
 
 interface MethodInfo {
   name: string;
   category: string;
-  tier: 'unit' | 'e2e';
   covered: boolean;
 }
 
-/** Public methods explicitly listed — private helpers are excluded from coverage. */
-const PUBLIC_METHODS = [
-  'send',
-  'receive',
-  'receiveAll',
-  'clean',
-  'applyFilters',
-  'extractHtmlFromSource',
-  'extractTextFromSource',
-];
+export interface ApiCoverageOptions {
+  rootDir?: string;
+  testDir?: string;
+  srcDir?: string;
+  nodeModulesDir?: string;
+  ignoreTestPatterns?: string[];
+}
 
-test('API Coverage Report', async () => {
-  const testDir = path.resolve(__dirname);
-  const unitFiles = ['filter-logic.spec.ts', 'mime-parsing.spec.ts'];
-  const e2eFiles = ['email-integration.spec.ts'];
+export class ApiCoverageReporter {
+  private rootDir: string;
+  private testDir: string;
+  private srcDir: string;
+  private nodeModulesDir: string;
+  private ignoreTestPatterns: string[];
 
-  const readFiles = (files: string[]) =>
-    files
-      .filter(f => fs.existsSync(path.join(testDir, f)))
-      .map(f => fs.readFileSync(path.join(testDir, f), 'utf-8'))
-      .join('\n');
+  constructor(options: ApiCoverageOptions = {}) {
+    // Default to the parent directory of the current script
+    this.rootDir = options.rootDir || path.resolve(__dirname, '..');
 
-  const unitSource = readFiles(unitFiles);
-  const e2eSource = readFiles(e2eFiles);
-  const allSource = unitSource + '\n' + e2eSource;
+    // Default targets, highly customizable via options
+    this.testDir = options.testDir || path.join(this.rootDir, 'tests');
+    this.srcDir = options.srcDir || path.join(this.rootDir, 'src');
+    this.nodeModulesDir = options.nodeModulesDir || path.join(this.rootDir, 'node_modules', '@civitas-cerebrum');
 
-  const publicMethods = PUBLIC_METHODS;
-
-  const apis: MethodInfo[] = [];
-
-  // ── Unit test coverage ──
-  for (const m of publicMethods) {
-    const pattern = new RegExp(`\\.${m}\\b`);
-    apis.push({
-      name: m,
-      category: 'EmailClient',
-      tier: 'unit',
-      covered: pattern.test(unitSource),
-    });
+    this.ignoreTestPatterns = options.ignoreTestPatterns || [];
   }
 
-  // ── E2E test coverage ──
-  for (const m of publicMethods) {
-    const pattern = new RegExp(`\\.${m}\\b`);
-    apis.push({
-      name: m,
-      category: 'EmailClient',
-      tier: 'e2e',
-      covered: pattern.test(e2eSource),
-    });
+  // Helper to recursively find files
+  private walkDir(dir: string, extensions: string[], ignorePatterns: string[] = []): string[] {
+    let fileList: string[] = [];
+    if (!fs.existsSync(dir)) return fileList;
+
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      const filePath = path.join(dir, file);
+      const isIgnored = ignorePatterns.some(p => filePath.includes(p));
+
+      if (isIgnored) continue;
+
+      if (fs.statSync(filePath).isDirectory()) {
+        fileList = fileList.concat(this.walkDir(filePath, extensions, ignorePatterns));
+      } else {
+        if (extensions.some(ext => file.endsWith(ext))) {
+          fileList.push(filePath);
+        }
+      }
+    }
+    return fileList;
   }
 
-  // ── Build report ──
-  const unitApis = apis.filter(a => a.tier === 'unit');
-  const e2eApis = apis.filter(a => a.tier === 'e2e');
-  const unitCovered = unitApis.filter(a => a.covered);
-  const e2eCovered = e2eApis.filter(a => a.covered);
+  // Uses TypeScript AST to extract classes and their public methods without executing the file
+  private extractClassesAndMethods(filePath: string): Array<{ className: string, methods: string[] }> {
+    const sourceCode = fs.readFileSync(filePath, 'utf-8');
+    const sourceFile = ts.createSourceFile(filePath, sourceCode, ts.ScriptTarget.Latest, true);
+    const result: Array<{ className: string, methods: string[] }> = [];
 
-  // Combined: a method is covered if it appears in either unit or e2e
-  const combinedCovered = publicMethods.filter(m =>
-    apis.some(a => a.name === m && a.covered)
-  );
+    function visit(node: ts.Node) {
+      if (ts.isClassDeclaration(node) && node.name) {
+        const className = node.name.text;
+        const methods: string[] = [];
 
-  const lines: string[] = [];
-  lines.push('');
-  lines.push('========================================================');
-  lines.push('                  API COVERAGE REPORT                    ');
-  lines.push('========================================================');
+        node.members.forEach(member => {
+          if (ts.isMethodDeclaration(member) && member.name) {
+            const hasPrivate = member.modifiers?.some(m => m.kind === ts.SyntaxKind.PrivateKeyword);
+            const hasProtected = member.modifiers?.some(m => m.kind === ts.SyntaxKind.ProtectedKeyword);
+            const methodName = member.name.getText(sourceFile);
 
-  // ── Unit tests ──
-  lines.push('');
-  lines.push('  UNIT TESTS (filter-logic + mime-parsing)');
-  lines.push('  ----------------------------------------');
-  const unitPct = ((unitCovered.length / unitApis.length) * 100).toFixed(0);
-  lines.push(`  EmailClient: ${unitCovered.length}/${unitApis.length} (${unitPct}%)`);
-  for (const api of unitApis) {
-    const icon = api.covered ? '  [x]' : '  [ ]';
-    lines.push(`    ${icon} ${api.name}`);
+            const isConstructor = methodName === 'constructor';
+            const isInternal = methodName.startsWith('_');
+
+            if (!hasPrivate && !hasProtected && !isConstructor && !isInternal) {
+              methods.push(methodName);
+            }
+          }
+        });
+
+        if (methods.length > 0) {
+          result.push({ className, methods });
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+
+    visit(sourceFile);
+    return result;
   }
 
-  // ── E2E tests ──
-  lines.push('');
-  lines.push('  E2E TESTS (email-integration)');
-  lines.push('  -----------------------------');
-  const e2ePct = ((e2eCovered.length / e2eApis.length) * 100).toFixed(0);
-  lines.push(`  EmailClient: ${e2eCovered.length}/${e2eApis.length} (${e2ePct}%)`);
-  for (const api of e2eApis) {
-    const icon = api.covered ? '  [x]' : '  [ ]';
-    lines.push(`    ${icon} ${api.name}`);
-  }
+  public async runCoverageReport() {
+    // 1. Load all test source code into one massive string
+    const testFiles = this.walkDir(this.testDir, ['.spec.ts'], this.ignoreTestPatterns);
+    let testSource = testFiles.map(f => fs.readFileSync(f, 'utf-8')).join('\n');
 
-  // ── Overall summary ──
-  lines.push('');
-  lines.push('========================================================');
-  lines.push(`  OVERALL: ${combinedCovered.length}/${publicMethods.length} methods (${((combinedCovered.length / publicMethods.length) * 100).toFixed(1)}%)`);
-  lines.push(`  UNIT:    ${unitCovered.length}/${unitApis.length} methods (${((unitCovered.length / unitApis.length) * 100).toFixed(1)}%)`);
-  lines.push(`  E2E:     ${e2eCovered.length}/${e2eApis.length} methods (${((e2eCovered.length / e2eApis.length) * 100).toFixed(1)}%)`);
-  lines.push('========================================================');
+    // Strip single-line and multi-line comments from the test source
+    testSource = testSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
 
-  // ── Uncovered methods ──
-  const uncoveredMethods = publicMethods.filter(
-    m => !apis.some(a => a.name === m && a.covered)
-  );
-  if (uncoveredMethods.length > 0) {
+    // Helper to check coverage using regex against the test source code
+    const checkCoverage = (method: string) => {
+      const pattern = new RegExp(`\\.\\b${method}\\b\\s*\\(`);
+      return pattern.test(testSource);
+    };
+
+    const apis: MethodInfo[] = [];
+
+    // 2. Scan internal source files
+    const sourceFiles = this.walkDir(this.srcDir, ['.ts'], ['.spec.ts', '.d.ts']);
+    for (const file of sourceFiles) {
+      const classes = this.extractClassesAndMethods(file);
+      for (const { className, methods } of classes) {
+        for (const m of methods) {
+          apis.push({ name: m, category: className, covered: checkCoverage(m) });
+        }
+      }
+    }
+
+    // 3. Scan External packages (.d.ts type files)
+    if (fs.existsSync(this.nodeModulesDir)) {
+      const externalFiles = this.walkDir(this.nodeModulesDir, ['.d.ts', '.ts'], ['node_modules']);
+
+      for (const file of externalFiles) {
+        const classes = this.extractClassesAndMethods(file);
+        for (const { className, methods } of classes) {
+          for (const m of methods) {
+            // Avoid duplicating classes if they exist in both src and node_modules
+            if (!apis.some(a => a.category === className && a.name === m)) {
+              apis.push({ name: m, category: className, covered: checkCoverage(m) }); // Removed legacy tier property
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Build Report
+    const lines: string[] = [
+      '',
+      '========================================================',
+      '                  API COVERAGE REPORT                    ',
+      '========================================================',
+      ''
+    ];
+
+    const categories = [...new Set(apis.map((a) => a.category))].sort();
+    for (const cat of categories) {
+      const catApis = apis.filter((a) => a.category === cat);
+      const catCovered = catApis.filter((a) => a.covered);
+      const catPct = catApis.length ? ((catCovered.length / catApis.length) * 100).toFixed(0) : '0';
+
+      lines.push(`  ${cat}: ${catCovered.length}/${catApis.length} (${catPct}%)`);
+      for (const api of catApis) {
+        lines.push(`    ${api.covered ? '  [x]' : '  [ ]'} ${api.name}`);
+      }
+      lines.push('');
+    }
+
+    const allCovered = apis.filter((a) => a.covered);
+    lines.push(
+      '========================================================',
+      `  OVERALL: ${allCovered.length}/${apis.length} methods (${apis.length ? ((allCovered.length / apis.length) * 100).toFixed(1) : 0}%)`,
+      '========================================================'
+    );
+
+    const uncoveredTotal = apis.filter((a) => !a.covered);
+
+    if (uncoveredTotal.length > 0) {
+      lines.push('', '  Uncovered methods (not in any test):');
+      for (const api of uncoveredTotal) {
+        lines.push(`    [ ] [${api.category}] ${api.name}`);
+      }
+    }
+
     lines.push('');
-    lines.push('  Uncovered methods (not in any test):');
-    for (const m of uncoveredMethods) {
-      lines.push(`    [ ] ${m}`);
+
+    const report = lines.join('\n');
+    console.log(report);
+
+    // 5. Write report and enforce coverage natively
+    const reportPath = path.resolve(this.rootDir, 'api-coverage-report.txt');
+    fs.writeFileSync(reportPath, report, 'utf-8');
+
+    if (uncoveredTotal.length > 0) {
+      console.warn(`\n❌ Build Failed: API coverage is not 100%. Missing ${uncoveredTotal.length} methods.`);
+      process.exit(1);
+    } else {
+      console.log('\n✅ Build Passed: 100% API Coverage verified.');
+      process.exit(0);
     }
   }
+}
 
-  lines.push('');
+// ==========================================
+// Execution Block
+// ==========================================
 
-  const report = lines.join('\n');
-  console.log(report);
+// If you want to customize the test directory, pass it in here:
+const reporter = new ApiCoverageReporter({
+  // testDir: path.resolve(__dirname, '../custom-test-folder') 
+});
 
-  const reportPath = path.resolve(__dirname, '..', 'api-coverage-report.txt');
-  fs.writeFileSync(reportPath, report, 'utf-8');
-
-  await test.info().attach('API Coverage Report', {
-    body: report,
-    contentType: 'text/plain',
-  });
-
-  // ── Enforce 100% Coverage ──
-  expect(
-    uncoveredMethods.length,
-    `API coverage is not 100%. Uncovered methods: ${uncoveredMethods.join(', ')}`
-  ).toBe(0);
+reporter.runCoverageReport().catch((err) => {
+  console.error('An unexpected error occurred during the coverage check:', err);
+  process.exit(1);
 });
