@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect } from '../src/fixtures';
 import { EmailFilterType } from '../src';
 
 test.describe('EmailClient Integration Workflows', () => {
@@ -119,5 +119,60 @@ test.describe('EmailClient Integration Workflows', () => {
                 pollInterval: 1000,
             })
         ).rejects.toThrow(/No email matching criteria found within 5000ms/);
+    });
+
+    // ─── NEW E2E TESTS ───────────────────────────────────────────────
+
+    test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async ({ emailClient }) => {
+        const batchId = `ClientFilterTest-${Date.now()}`;
+        const recipient = process.env.RECEIVER_EMAIL!;
+
+        await Promise.all([
+            emailClient.send({ to: recipient, subject: `${batchId} - Target`, text: 'Apple' }),
+            emailClient.send({ to: recipient, subject: `${batchId} - Ignore`, text: 'Banana' }),
+        ]);
+
+        const allEmails = await emailClient.receiveAll({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            waitTimeout: 45000,
+        });
+
+        expect(allEmails.length).toBeGreaterThanOrEqual(2);
+
+        const filtered = emailClient.applyFilters(allEmails, [
+            { type: EmailFilterType.CONTENT, value: 'Apple' }
+        ]);
+
+        expect(filtered).toHaveLength(1);
+        expect(filtered[0].subject).toContain('Target');
+
+        await emailClient.clean({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }]
+        });
+    });
+
+    test('should accurately extract HTML and Text from raw source (extractHtmlFromSource / extractTextFromSource)', async ({ emailClient }) => {
+        // Craft a raw multipart MIME string to simulate what the IMAP client actually fetches.
+        // This ensures we hit the boundary matching and content extraction logic.
+        const rawEmailSource = [
+            'Content-Type: multipart/alternative; boundary="test-boundary-123"',
+            '',
+            '--test-boundary-123',
+            'Content-Type: text/plain; charset="utf-8"',
+            '',
+            'Fallback text content',
+            '--test-boundary-123',
+            'Content-Type: text/html; charset="utf-8"',
+            '',
+            '<div><h1>Title</h1><p>Paragraph</p></div>',
+            '--test-boundary-123--'
+        ].join('\r\n');
+
+        // Pass the raw string instead of the parsed email object
+        const extractedHtml = (emailClient as any).extractHtmlFromSource(rawEmailSource); 
+        expect(extractedHtml).toContain('<h1>Title</h1>');
+
+        const extractedText = (emailClient as any).extractTextFromSource(rawEmailSource);
+        expect(extractedText).toContain('Fallback text content');
     });
 });

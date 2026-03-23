@@ -1,6 +1,6 @@
 import { test as base } from '@playwright/test';
-import { EmailClient } from '../src/EmailClient';
-import { EmailCredentials } from '../src/types';
+import { EmailClient } from './EmailClient';
+import { EmailCredentials } from './types';
 import * as dotenv from 'dotenv';
 
 // Load .env for local testing; in CI the vars come from GitHub Actions secrets
