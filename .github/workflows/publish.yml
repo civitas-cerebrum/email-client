@@ -29,8 +29,8 @@ jobs:
       - name: 🛠️ Build package
         run: npm run build
 
-      - name: 🧪 Run Tests
-        run: npm test
+      - name: 🧪 Run All Tests (unit + integration)
+        run: npm run test:all
         env:
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { describe, test, expect, beforeEach } from 'vitest';
 import { EmailClient } from '../src/EmailClient';
 import { EmailCredentials } from '../src/types';
 
@@ -10,10 +10,10 @@ const dummyCredentials: EmailCredentials = {
     receiverPassword: 'pass',
 };
 
-test.describe('MIME Parsing', () => {
+describe('MIME Parsing', () => {
     let client: EmailClient;
 
-    test.beforeEach(() => {
+    beforeEach(() => {
         client = new EmailClient(dummyCredentials);
     });
 
