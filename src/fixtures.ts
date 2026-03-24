@@ -1,4 +1,4 @@
-import { test as base } from '@playwright/test';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EmailClient } from './EmailClient';
 import { EmailCredentials } from './types';
 import * as dotenv from 'dotenv';
@@ -20,21 +20,28 @@ type EmailFixtures = {
     emailClient: EmailClient;
 };
 
-export const test = base.extend<EmailFixtures>({
-    emailClient: async ({}, use, testInfo) => {
-        if (!isEmailConfigured()) {
-            testInfo.skip(true, 'Email environment variables are not configured');
-        }
-        const credentials: EmailCredentials = {
-            senderEmail: process.env.SENDER_EMAIL!,
-            senderPassword: process.env.SENDER_PASSWORD!,
-            senderSmtpHost: process.env.SENDER_SMTP_HOST!,
-            receiverEmail: process.env.RECEIVER_EMAIL!,
-            receiverPassword: process.env.RECEIVER_PASSWORD!,
-        };
-        const client = new EmailClient(credentials);
-        await use(client);
-    },
-});
+// Test context that can be used by test files
+export function createEmailClientFixture() {
+    const emailClient = new EmailClient({
+        senderEmail: 'sender@test.com',
+        senderPassword: 'pass',
+        senderSmtpHost: 'smtp.test.com',
+        receiverEmail: 'receiver@test.com',
+        receiverPassword: 'pass',
+    });
+    return emailClient;
+}
 
-export { expect } from '@playwright/test';
+// Export test utilities that match Playwright's API
+export const test = {
+    describe,
+    it: test,
+    expect,
+};
+
+// Export test info for skipping logic
+export function testInfo(skip: boolean, reason: string): void {
+    if (skip) {
+        throw new Error(`Test skipped: ${reason}`);
+    }
+}
