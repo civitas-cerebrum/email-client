@@ -28,7 +28,7 @@ jobs:
         run: npm run build
 
       - name: 📊 Run Unit Tests Only (no integration tests)
-        run: vitest run tests/mime-parsing.spec.ts tests/unit-tests.spec.ts
+        run: npm run test
 
       - name: 📊 Run API Coverage Report
         run: npm run test:coverage
