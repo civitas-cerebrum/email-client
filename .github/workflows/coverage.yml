@@ -50,7 +50,7 @@ jobs:
             }[process.env.REPORT_FORMAT];
 
             // 2. Generate the report
-            cp.execSync(`${config.cmd} -- --format=${config.flag}`);
+            cp.execSync(`${config.cmd} --format=${config.flag}`);
             const body = fs.readFileSync('test-coverage-report.md', 'utf-8');
 
             // 3. Find and Update/Create comment
