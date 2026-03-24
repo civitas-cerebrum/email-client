@@ -23,7 +23,7 @@
     "nodemailer": "^8.0.3"
   },
   "devDependencies": {
-    "@civitas-cerebrum/test-coverage": "^0.0.4",
+    "@civitas-cerebrum/test-coverage": "^0.0.6",
     "@types/debug": "^4.1.13",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.0.0",
