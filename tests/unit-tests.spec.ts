@@ -1,16 +1,17 @@
-import { describe, test, expect, beforeEach } from 'vitest';
+import { describe, test, expect, beforeEach, vi } from 'vitest';
 import { EmailFilterType, EmailFilter, EmailCredentials, ReceivedEmail } from '../src/types';
 import { EmailClient } from '../src/EmailClient';
-import { generateApiCoverage } from '../src/index'
 
+// Purely dummy credentials — these will never be used for real network calls
 const dummyCredentials: EmailCredentials = {
-    senderEmail: 'sender@test.com',
-    senderPassword: 'pass',
-    senderSmtpHost: 'smtp.test.com',
-    receiverEmail: 'receiver@test.com',
-    receiverPassword: 'pass',
+    senderEmail: 'fake-sender@test.com',
+    senderPassword: 'fake-password',
+    senderSmtpHost: 'fake-smtp.test.com',
+    receiverEmail: 'fake-receiver@test.com',
+    receiverPassword: 'fake-password',
 };
 
+// Factory function for clean, DRY test data
 function makeEmail(overrides: Partial<ReceivedEmail> = {}): ReceivedEmail {
     return {
         filePath: '/tmp/test.html',
@@ -27,52 +28,53 @@ describe('EmailClient Unit Tests', () => {
     let emailClient: EmailClient;
 
     beforeEach(() => {
+        // Initialize the client with dummy credentials for every test
         emailClient = new EmailClient(dummyCredentials);
+
+        // Mock internal network clients to prevent actual API/Network calls.
+        // (Adjust these property names if your internal implementation differs, 
+        // e.g., if you use 'nodemailer' instead of an internal 'transporter' property).
+        (emailClient as any).imapClient = {
+            connect: vi.fn().mockResolvedValue(undefined),
+            logout: vi.fn().mockResolvedValue(undefined),
+            deleteMessages: vi.fn().mockResolvedValue(true),
+        };
+
+        (emailClient as any).transporter = {
+            sendMail: vi.fn().mockResolvedValue({ messageId: 'mock-id' }),
+        };
     });
 
-    // ─── NEW UNIT TESTS: send & clean ────────────────────────────────
+    // ─── UNIT TESTS: send & clean (Fully mocked) ─────────────────────
 
     describe('send() logic', () => {
-
         test('should throw an error if recipient "to" is missing', async () => {
-            await expect(
-                emailClient.send({ subject: 'Test', text: 'Hello' } as any)
-            ).rejects.toThrow();
+            // @ts-expect-error - Intentionally testing missing parameters to trigger runtime validation
+            await expect(emailClient.send({ subject: 'Test', text: 'Hello' })).rejects.toThrow();
         });
 
         test('should throw an error if "subject" is missing', async () => {
-            await expect(
-                emailClient.send({ to: 'test@example.com', text: 'Hello' } as any)
-            ).rejects.toThrow();
+            // @ts-expect-error - Intentionally testing missing parameters to trigger runtime validation
+            await expect(emailClient.send({ to: 'test@example.com', text: 'Hello' })).rejects.toThrow();
         });
 
         test('should successfully resolve when valid parameters are provided', async () => {
-            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
-
+            // This will execute validation logic and then call the mocked transporter, resolving instantly
             await expect(
-                testClient.send({ to: 'test@example.com', subject: 'Test', text: 'Hello' })
+                emailClient.send({ to: 'test@example.com', subject: 'Test', text: 'Hello' })
             ).resolves.not.toThrow();
         });
     });
 
     describe('clean() logic', () => {
         test('should successfully resolve when called with no filters (clean all)', async () => {
-            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
-
-            // Mock internal IMAP client to avoid real operations
-            (testClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
-
-            await expect(testClient.clean()).resolves.not.toThrow();
+            // This will execute clean logic and call the mocked imapClient, resolving instantly
+            await expect(emailClient.clean()).resolves.not.toThrow();
         });
 
         test('should successfully resolve when called with specific filters', async () => {
-            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
-
-            // Mock internal IMAP client to avoid real operations
-            (testClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
-
             await expect(
-                testClient.clean({
+                emailClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: 'Old Test' }]
                 })
             ).resolves.not.toThrow();
