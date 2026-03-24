@@ -60,8 +60,7 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test.skip('should fetch multiple emails using receiveAll', async () => {
-        // Skipping - receives multiple emails takes >10s, runs as integration test on publish pipeline
+    test('should fetch multiple emails using receiveAll', async () => {
         const batchId = `BatchTest-${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
