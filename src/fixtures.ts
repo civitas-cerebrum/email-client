@@ -29,56 +29,46 @@ export function createEmailClientFixture() {
     return emailClient;
 }
 
-// Create a test client with real credentials (for tests that need to actually send/receive)
-export function createTestClientWithCredentials() {
-    const senderEmail = process.env.SENDER_EMAIL;
-    const senderPassword = process.env.SENDER_PASSWORD;
-    const senderSmtpHost = process.env.SENDER_SMTP_HOST;
-    const receiverEmail = process.env.RECEIVER_EMAIL;
-    const receiverPassword = process.env.RECEIVER_PASSWORD;
+// Helper to validate and retrieve environment variables
+function getValidatedCredentials() {
+    const requiredVars = [
+        'SENDER_EMAIL',
+        'SENDER_PASSWORD',
+        'SENDER_SMTP_HOST',
+        'RECEIVER_EMAIL',
+        'RECEIVER_PASSWORD'
+    ];
 
-    // Validate credentials
-    if (!senderEmail || !senderPassword || !senderSmtpHost || !receiverEmail || !receiverPassword) {
+    // Filter out the variables that are missing or empty
+    const missingVars = requiredVars.filter(envVar => !process.env[envVar]);
+
+    if (missingVars.length > 0) {
         throw new Error(
-            'Email credentials not configured. Required environment variables: ' +
-            'SENDER_EMAIL, SENDER_PASSWORD, SENDER_SMTP_HOST, RECEIVER_EMAIL, RECEIVER_PASSWORD'
+            `Email credentials not configured. Missing required environment variables: ${missingVars.join(', ')}`
         );
     }
 
-    return new EmailClient({
-        senderEmail,
-        senderPassword,
-        senderSmtpHost,
-        receiverEmail,
-        receiverPassword,
-    });
+    return {
+        senderEmail: process.env.SENDER_EMAIL as string,
+        senderPassword: process.env.SENDER_PASSWORD as string,
+        senderSmtpHost: process.env.SENDER_SMTP_HOST as string,
+        receiverEmail: process.env.RECEIVER_EMAIL as string,
+        receiverPassword: process.env.RECEIVER_PASSWORD as string,
+    };
+}
+
+// Create a test client with real credentials (for tests that need to actually send/receive)
+export function createTestClientWithCredentials() {
+    const credentials = getValidatedCredentials();
+    return new EmailClient(credentials);
 }
 
 // Global fixture setup for emailClient (used by tests that need real email operations)
 export let globalEmailClient: EmailClient | null = null;
 
 export async function setupGlobalEmailClient(): Promise<EmailClient> {
-    const senderEmail = process.env.SENDER_EMAIL;
-    const senderPassword = process.env.SENDER_PASSWORD;
-    const senderSmtpHost = process.env.SENDER_SMTP_HOST;
-    const receiverEmail = process.env.RECEIVER_EMAIL;
-    const receiverPassword = process.env.RECEIVER_PASSWORD;
-
-    // Validate that all required credentials are configured
-    if (!senderEmail || !senderPassword || !senderSmtpHost || !receiverEmail || !receiverPassword) {
-        throw new Error(
-            'Email credentials not configured. Required environment variables: ' +
-            'SENDER_EMAIL, SENDER_PASSWORD, SENDER_SMTP_HOST, RECEIVER_EMAIL, RECEIVER_PASSWORD'
-        );
-    }
-
-    globalEmailClient = new EmailClient({
-        senderEmail,
-        senderPassword,
-        senderSmtpHost,
-        receiverEmail,
-        receiverPassword,
-    });
+    const credentials = getValidatedCredentials();
+    globalEmailClient = new EmailClient(credentials);
     return globalEmailClient;
 }
 
