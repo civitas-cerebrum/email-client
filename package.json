@@ -10,7 +10,7 @@
     "test": "vitest run tests/mime-parsing.spec.ts tests/unit-tests.spec.ts",
     "test:e2e": "vitest run tests/email-integration.spec.ts",
     "test:all": "vitest run tests/*.spec.ts",
-    "test:coverage": "npx test-coverage --format github",
+    "test:coverage": "npx test-coverage --format github-table",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -23,7 +23,7 @@
     "nodemailer": "^8.0.3"
   },
   "devDependencies": {
-    "@civitas-cerebrum/test-coverage": "^0.0.2",
+    "@civitas-cerebrum/test-coverage": "^0.0.3",
     "@types/debug": "^4.1.13",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.0.0",
