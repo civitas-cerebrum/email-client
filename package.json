@@ -7,10 +7,10 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc",
-    "test": "vitest run",
+    "test": "vitest run tests/mime-parsing.spec.ts tests/unit-tests.spec.ts",
     "test:e2e": "vitest run tests/email-integration.spec.ts",
-    "test:all": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:all": "vitest run tests/*.spec.ts",
+    "test:coverage": "npx test-coverage --format github",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -19,7 +19,7 @@
   "dependencies": {
     "debug": "^4.4.3",
     "imapflow": "^1.2.16",
-    "mailparser": "^3.9.5",
+    "mailparser": "^3.9.5", 
     "nodemailer": "^8.0.3"
   },
   "devDependencies": {

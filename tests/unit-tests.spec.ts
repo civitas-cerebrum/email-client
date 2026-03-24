@@ -1,7 +1,8 @@
-import { test, expect } from '@playwright/test';
+import { describe, test, expect, beforeEach } from 'vitest';
 import { EmailFilterType, EmailFilter, EmailCredentials, ReceivedEmail } from '../src/types';
 import { EmailClient } from '../src/EmailClient';
-import { generateApiCoverage } from '../src/index copy'
+import { generateApiCoverage } from '../src/index'
+
 const dummyCredentials: EmailCredentials = {
     senderEmail: 'sender@test.com',
     senderPassword: 'pass',
@@ -22,21 +23,17 @@ function makeEmail(overrides: Partial<ReceivedEmail> = {}): ReceivedEmail {
     };
 }
 
-test.describe('EmailClient Unit Tests', () => {
+describe('EmailClient Unit Tests', () => {
     let emailClient: EmailClient;
 
-    test.beforeEach(() => {
+    beforeEach(() => {
         emailClient = new EmailClient(dummyCredentials);
     });
 
     // ─── NEW UNIT TESTS: send & clean ────────────────────────────────
 
-    test.describe('send() logic', () => {
+    describe('send() logic', () => {
 
-        const result = generateApiCoverage();
-
-        // Output to console
-        console.log(result.report);
         test('should throw an error if recipient "to" is missing', async () => {
             await expect(
                 emailClient.send({ subject: 'Test', text: 'Hello' } as any)
@@ -50,28 +47,32 @@ test.describe('EmailClient Unit Tests', () => {
         });
 
         test('should successfully resolve when valid parameters are provided', async () => {
-            // Mock internal transporter to avoid actual SMTP calls in unit tests
-            (emailClient as any).transporter = { sendMail: async () => true };
+            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
 
             await expect(
-                emailClient.send({ to: 'test@example.com', subject: 'Test', text: 'Hello' })
+                testClient.send({ to: 'test@example.com', subject: 'Test', text: 'Hello' })
             ).resolves.not.toThrow();
         });
     });
 
-    test.describe('clean() logic', () => {
+    describe('clean() logic', () => {
         test('should successfully resolve when called with no filters (clean all)', async () => {
-            // Mock internal IMAP client
-            (emailClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
+            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
 
-            await expect(emailClient.clean()).resolves.not.toThrow();
+            // Mock internal IMAP client to avoid real operations
+            (testClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
+
+            await expect(testClient.clean()).resolves.not.toThrow();
         });
 
         test('should successfully resolve when called with specific filters', async () => {
-            (emailClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
+            const testClient = await import('../src/fixtures').then(m => m.createTestClientWithCredentials());
+
+            // Mock internal IMAP client to avoid real operations
+            (testClient as any).imapClient = { deleteMessages: async () => true, connect: async () => { }, logout: async () => { } };
 
             await expect(
-                emailClient.clean({
+                testClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: 'Old Test' }]
                 })
             ).resolves.not.toThrow();
@@ -80,7 +81,7 @@ test.describe('EmailClient Unit Tests', () => {
 
     // ─── EXISTING UNIT TESTS: Filter Logic ───────────────────────────
 
-    test.describe('applyFilters() logic', () => {
+    describe('applyFilters() logic', () => {
         test('SUBJECT filter — exact match', () => {
             const candidates = [
                 makeEmail({ subject: 'Your OTP Code' }),
@@ -305,7 +306,7 @@ test.describe('EmailClient Unit Tests', () => {
 
     // ─── EXISTING UNIT TESTS: Validation ─────────────────────────────
 
-    test.describe('Validation', () => {
+    describe('Validation', () => {
         test('receive() throws when filters array is empty', async () => {
             await expect(
                 emailClient.receive({ filters: [], waitTimeout: 100 })

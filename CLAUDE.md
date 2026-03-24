@@ -6,7 +6,7 @@ A standalone SMTP/IMAP email client for test automation. Send, receive, search, 
 
 ```bash
 npm run build        # Clean build (rm -rf dist && tsc)
-npm test             # Run all tests via Playwright Test
+npm test             # Run all tests via Vitest
 npx tsc --noEmit     # Type check only
 ```
 
@@ -29,7 +29,6 @@ npx tsc --noEmit     # Type check only
 
 ## Key Design Decisions
 
-- **No Playwright runtime dependency** — uses `@playwright/test` as test runner only
 - **Two-phase filtering** — exact match first, partial case-insensitive fallback with warning log
 - **`applyFilters` is public** — consumers can use it for client-side filtering of already-fetched emails
 - **Logger** uses `debug` with `email-client:*` namespace (not `TESTER_DEBUG`)
