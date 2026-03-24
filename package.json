@@ -10,7 +10,7 @@
     "test": "vitest run tests/mime-parsing.spec.ts tests/unit-tests.spec.ts",
     "test:e2e": "vitest run tests/email-integration.spec.ts",
     "test:all": "vitest run tests/*.spec.ts",
-    "test:coverage": "npx test-coverage --format github",
+    "test:coverage": "npx test-coverage --format text",
     "prepublishOnly": "npm run build"
   },
   "files": [
