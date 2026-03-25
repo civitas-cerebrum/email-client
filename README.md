@@ -1,24 +1,31 @@
 # @civitas-cerebrum/email-client
 
-[![NPM Version](https://img.shields.io/npm/v/@civitas-cerebrum/email-client?color=rgb(88%2C%20171%2C%2070))](https://www.npmjs.com/package/@civitas-cerebrum/email-client)
+[](https://www.npmjs.com/package/@civitas-cerebrum/email-client)
 
-A generic SMTP/IMAP email client for test automation. Send, receive, search, and clean emails with composable filters.
+A highly robust, zero-dependency SMTP/IMAP email client built specifically for E2E test automation. Send, receive, search, manage, and clean emails using composable, deterministic filters.
 
-- **Zero Playwright runtime dependency** — works with any test runner
-- **Composable filters** — combine subject, sender, content, date, and more with AND logic
-- **Two-phase matching** — exact match first, partial case-insensitive fallback
-- **Full inbox management** — send, receive, receive all, and clean
+## Why this client?
+
+  * **Zero Playwright runtime dependency** — Works seamlessly with Playwright, Cypress, Vitest, Jest, or any Node.js test runner.
+  * **Smart Polling Engine** — Built-in retry logic prevents flaky tests caused by slow email delivery.
+  * **Memory Protected** — Automatically caps raw MIME fetches to prevent Node.js memory crashes when hitting large, unmanaged test inboxes.
+  * **Two-Phase Matching** — Evaluates exact IMAP criteria first, then falls back to a smart, case-insensitive client-side match to catch poorly formatted automated emails.
+  * **Full Mailbox Management** — Send, receive, flag, archive, and aggressively clean your test environment.
+
+-----
 
 ## Installation
 
 ```bash
-npm i @civitas-cerebrum/email-client
+npm install @civitas-cerebrum/email-client
 ```
+
+-----
 
 ## Quick Start
 
 ```ts
-import { EmailClient, EmailFilterType } from '@civitas-cerebrum/email-client';
+import { EmailClient, EmailFilterType, EmailMarkAction } from '@civitas-cerebrum/email-client';
 
 const client = new EmailClient({
     senderEmail: 'sender@example.com',
@@ -28,23 +35,36 @@ const client = new EmailClient({
     receiverPassword: 'app-password',
 });
 
-// Send an email
+// 1. Send an email
 await client.send({
     to: 'user@example.com',
     subject: 'Your OTP Code',
     text: 'Your code is 123456',
 });
 
-// Receive the latest matching email
+// 2. Poll the inbox until the email arrives
 const email = await client.receive({
     filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }],
+    waitTimeout: 30000 // Waits up to 30 seconds
 });
-console.log(email.subject, email.text);
+console.log(email.text); // "Your code is 123456"
+
+// 3. Mark as Read, or clean up the test
+await client.mark({
+    action: EmailMarkAction.READ,
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }]
+});
+
+await client.clean({
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }]
+});
 ```
 
-## API
+-----
 
-### Constructor
+## API Reference
+
+### Initialization
 
 ```ts
 const client = new EmailClient(credentials: EmailCredentials);
@@ -54,14 +74,18 @@ const client = new EmailClient(credentials: EmailCredentials);
 |---|---|---|---|
 | `senderEmail` | `string` | — | SMTP sender email address |
 | `senderPassword` | `string` | — | SMTP sender password or app password |
-| `senderSmtpHost` | `string` | — | SMTP host (e.g. `'smtp.gmail.com'`) |
+| `senderSmtpHost` | `string` | — | SMTP host (e.g., `'smtp.gmail.com'`) |
 | `senderSmtpPort` | `number` | `587` | SMTP port |
 | `receiverEmail` | `string` | — | IMAP receiver email address |
 | `receiverPassword` | `string` | — | IMAP receiver password or app password |
 | `receiverImapHost` | `string` | `'imap.gmail.com'` | IMAP host |
 | `receiverImapPort` | `number` | `993` | IMAP port |
 
-### Sending Emails
+-----
+
+### Sending Emails (`send`)
+
+Supports plain text, inline HTML, and loading HTML files directly from disk.
 
 ```ts
 // Plain text
@@ -70,30 +94,24 @@ await client.send({ to: 'user@example.com', subject: 'Test', text: 'Hello' });
 // Inline HTML
 await client.send({ to: 'user@example.com', subject: 'Report', html: '<h1>Results</h1>' });
 
-// HTML file template
-await client.send({ to: 'user@example.com', subject: 'Report', htmlFile: 'emails/report.html' });
+// HTML template from disk
+await client.send({ to: 'user@example.com', subject: 'Report', htmlFile: 'emails/template.html' });
 ```
 
-### Receiving Emails
+-----
 
-Use composable filters to search for emails. Combine as many filters as needed — all filters are applied with AND logic. Filtering tries exact match first, then falls back to partial case-insensitive match (with a warning log).
+### Receiving Emails (`receive` / `receiveAll`)
+
+The client uses a robust polling mechanism. It will continuously query the IMAP server until the `waitTimeout` is reached or the filters are satisfied. Combine multiple filters to create strict `AND` logic constraints.
 
 ```ts
-// Single filter — get the latest matching email
+// Get the single most recent matching email
 const email = await client.receive({
     filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP' }],
+    waitTimeout: 15000 // Optional: fail if not found in 15s
 });
 
-// Multiple filters — combine subject, sender, and content
-const email2 = await client.receive({
-    filters: [
-        { type: EmailFilterType.SUBJECT, value: 'Verification' },
-        { type: EmailFilterType.FROM, value: 'noreply@example.com' },
-        { type: EmailFilterType.CONTENT, value: 'verification code' },
-    ],
-});
-
-// Get ALL matching emails
+// Get ALL matching emails in the inbox (useful for batch processing)
 const allEmails = await client.receiveAll({
     filters: [
         { type: EmailFilterType.FROM, value: 'alerts@example.com' },
@@ -102,60 +120,88 @@ const allEmails = await client.receiveAll({
 });
 ```
 
-### Receive Options
+#### Receive Options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `filters` | `EmailFilter[]` | — | **Required.** Array of filters (AND logic) |
 | `folder` | `string` | `'INBOX'` | IMAP folder to search |
-| `waitTimeout` | `number` | `30000` | Max ms to poll for the email |
-| `pollInterval` | `number` | `3000` | Ms between poll attempts |
-| `downloadDir` | `string` | `os.tmpdir()/pw-emails` | Where to save downloaded HTML |
+| `waitTimeout` | `number` | `30000` | Max milliseconds to poll before throwing an error |
+| `pollInterval` | `number` | `3000` | Milliseconds to wait between IMAP fetch attempts |
+| `downloadDir` | `string` | `os.tmpdir()` | Directory to save downloaded `.html` copies |
 
-### Filter Types
+#### Available Filters (`EmailFilterType`)
 
-| Type | Value | Description |
+| Type | Value Type | Description |
 |---|---|---|
-| `EmailFilterType.SUBJECT` | `string` | Filter by email subject |
-| `EmailFilterType.FROM` | `string` | Filter by sender address |
-| `EmailFilterType.TO` | `string` | Filter by recipient address |
-| `EmailFilterType.CONTENT` | `string` | Filter by email body (HTML or plain text) |
-| `EmailFilterType.SINCE` | `Date` | Only include emails after this date |
+| `SUBJECT` | `string` | Exact or partial match of the email subject |
+| `FROM` | `string` | Sender email address |
+| `TO` | `string` | Recipient email address |
+| `CONTENT` | `string` | Matches anywhere in the HTML body or plain text fallback |
+| `SINCE` | `Date` | Only fetch emails received after this timestamp |
 
-### Cleaning the Inbox
+-----
+
+### Managing the Inbox (`mark` / `clean`)
+
+Keep your automated test inboxes clean and organized to prevent IMAP throttling and memory issues.
+
+#### Mark (Flagging and Moving)
+
+Modify the state of emails matching specific criteria. Returns the number of emails affected.
 
 ```ts
-// Delete emails matching filters
+// Apply standard flags
+await client.mark({
+    action: EmailMarkAction.READ, // READ, UNREAD, FLAGGED, UNFLAGGED
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'Welcome' }]
+});
+
+// Move emails to an archive folder
+await client.mark({
+    action: EmailMarkAction.ARCHIVED,
+    filters: [{ type: EmailFilterType.FROM, value: 'spam@example.com' }],
+    archiveFolder: 'Archive' // Note: This must match the server's localized folder name
+});
+
+// Apply custom IMAP flags
+await client.mark({
+    action: ['\\Draft', '\\Answered'],
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'Custom State' }]
+});
+```
+
+#### Clean (Deleting)
+
+Permanently delete emails from the server.
+
+```ts
+// Delete specific emails
 await client.clean({
     filters: [{ type: EmailFilterType.FROM, value: 'noreply@example.com' }],
 });
 
-// Delete all emails in the inbox
+// Nuke the entire inbox (Use with caution!)
 await client.clean();
 ```
 
-### Client-Side Filtering
+-----
 
-`applyFilters` is public — use it to filter already-fetched emails:
+### The `ReceivedEmail` Object
 
-```ts
-const filtered = client.applyFilters(emails, [
-    { type: EmailFilterType.SUBJECT, value: 'OTP' },
-]);
-```
+When you receive an email, the client parses the raw MIME source and returns a clean, strongly-typed object:
 
-## ReceivedEmail
-
-Each received email is downloaded as an HTML file and returned as:
-
-| Field | Type | Description |
+| Property | Type | Description |
 |---|---|---|
-| `filePath` | `string` | Local path to the downloaded HTML file |
-| `subject` | `string` | Email subject |
+| `subject` | `string` | Email subject line |
 | `from` | `string` | Sender address |
+| `to` | `string` | Recipient address |
 | `date` | `Date` | Date the email was sent |
-| `html` | `string` | Raw HTML content (empty string if plain-text only) |
-| `text` | `string` | Plain-text content |
+| `html` | `string` | Parsed HTML body (empty string if plain-text only) |
+| `text` | `string` | Parsed plain-text content |
+| `filePath` | `string` | Local path to the downloaded `.html` copy |
+
+-----
 
 ## Contributing
 
@@ -163,7 +209,7 @@ Each received email is downloaded as an HTML file and returned as:
 git clone https://github.com/Umutayb/email-client.git
 cd email-client
 npm install
-npm test
+npm run test
 ```
 
 ## License

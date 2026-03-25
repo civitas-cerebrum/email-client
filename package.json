@@ -3,13 +3,13 @@
   "version": "0.0.2",
   "description": "A generic SMTP/IMAP email client for test automation. Send, receive, search, and clean emails with composable filters.",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc",
     "test": "vitest run tests/mime-parsing.spec.ts tests/unit-tests.spec.ts",
     "test:e2e": "vitest run tests/email-integration.spec.ts",
-    "test:all": "vitest run tests/*.spec.ts",
+    "test:all": "vitest run tests",
     "test:coverage": "npx test-coverage --format github-table",
     "prepublishOnly": "npm run build"
   },

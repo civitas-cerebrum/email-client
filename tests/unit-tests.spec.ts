@@ -1,21 +1,19 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { EmailFilterType, EmailFilter, EmailCredentials, ReceivedEmail } from '../src/types';
 import { EmailClient } from '../src/EmailClient';
+import { EmailMarkAction } from '../src';
 
 // ─── 1. MOCK THE NETWORK LIBRARIES COMPLETELY ────────────────────────
-// This intercepts nodemailer and imapflow so they never hit the internet.
 
 vi.mock('nodemailer', () => {
     return {
         createTransport: vi.fn().mockReturnValue({
-            // Mimic Nodemailer's actual runtime validation
             sendMail: vi.fn().mockImplementation(async (mailOptions) => {
-                if (!mailOptions.to) {
-                    throw new Error('No recipients defined');
-                }
-                if (!mailOptions.subject) {
-                    throw new Error('No subject defined');
-                }
+                if (!mailOptions.to) throw new Error('No recipients defined');
+                if (!mailOptions.subject) throw new Error('No subject defined');
                 return { messageId: 'mock-id' };
             }),
             verify: vi.fn().mockResolvedValue(true),
@@ -23,23 +21,30 @@ vi.mock('nodemailer', () => {
     };
 });
 
+const mockMessageFlagsAdd = vi.fn().mockResolvedValue(true);
+const mockMessageFlagsRemove = vi.fn().mockResolvedValue(true);
+const mockMessageMove = vi.fn().mockResolvedValue(true);
+const mockMessageDelete = vi.fn().mockResolvedValue(true);
+const mockSearch = vi.fn().mockResolvedValue([1]);
+const mockMailboxOpen = vi.fn().mockResolvedValue(undefined);
+
 vi.mock('imapflow', () => {
     return {
-        ImapFlow: vi.fn().mockImplementation(() => {
-            return {
-                connect: vi.fn().mockResolvedValue(undefined),
-                logout: vi.fn().mockResolvedValue(undefined),
-                mailboxOpen: vi.fn().mockResolvedValue(undefined),
-                messageDelete: vi.fn().mockResolvedValue(true),
-                search: vi.fn().mockResolvedValue([]),
-                getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-            };
-        }),
+        ImapFlow: vi.fn().mockImplementation(() => ({
+            connect: vi.fn().mockResolvedValue(undefined),
+            logout: vi.fn().mockResolvedValue(undefined),
+            mailboxOpen: mockMailboxOpen,
+            messageDelete: mockMessageDelete,
+            messageFlagsAdd: mockMessageFlagsAdd,
+            messageFlagsRemove: mockMessageFlagsRemove,
+            messageMove: mockMessageMove,
+            search: mockSearch,
+            getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+        })),
     };
 });
 // ─────────────────────────────────────────────────────────────────────
 
-// Purely dummy credentials — these will never be used for real network calls
 const dummyCredentials: EmailCredentials = {
     senderEmail: 'fake-sender@test.com',
     senderPassword: 'fake-password',
@@ -48,12 +53,12 @@ const dummyCredentials: EmailCredentials = {
     receiverPassword: 'fake-password',
 };
 
-// Factory function for clean, DRY test data
 function makeEmail(overrides: Partial<ReceivedEmail> = {}): ReceivedEmail {
     return {
         filePath: '/tmp/test.html',
         subject: 'Your OTP Code',
         from: 'noreply@example.com',
+        to: 'fake-receiver@test.com',
         date: new Date('2025-06-01'),
         html: '<h1>Your code is 123456</h1>',
         text: 'Your code is 123456',
@@ -65,50 +70,178 @@ describe('EmailClient Unit Tests', () => {
     let emailClient: EmailClient;
 
     beforeEach(() => {
-        // Initialize the client with dummy credentials. 
-        // Thanks to vi.mock(), this will no longer trigger a real connection.
         emailClient = new EmailClient(dummyCredentials);
-
-        // (You can delete the old (emailClient as any).imapClient overrides that were here)
+        vi.clearAllMocks();
+        // Default: search returns one UID so action methods have something to act on
+        mockSearch.mockResolvedValue([1]);
     });
 
-    // ─── UNIT TESTS: send & clean (Fully isolated) ───────────────────
+    // ─── SEND() ──────────────────────────────────────────────────────
 
     describe('send() logic', () => {
-        test('should throw an error if recipient "to" is missing', async () => {
-            // @ts-expect-error - Intentionally testing missing parameters
+        test('should throw when recipient "to" is missing', async () => {
+            // @ts-expect-error intentionally testing missing param
             await expect(emailClient.send({ subject: 'Test', text: 'Hello' })).rejects.toThrow();
         });
 
-        test('should throw an error if "subject" is missing', async () => {
-            // @ts-expect-error - Intentionally testing missing parameters
+        test('should throw when "subject" is missing', async () => {
+            // @ts-expect-error intentionally testing missing param
             await expect(emailClient.send({ to: 'test@example.com', text: 'Hello' })).rejects.toThrow();
         });
 
-        test('should successfully resolve when valid parameters are provided', async () => {
-            // This now hits the vi.mock('nodemailer') fake transport
+        test('should resolve when valid text params are provided', async () => {
             await expect(
                 emailClient.send({ to: 'test@example.com', subject: 'Test', text: 'Hello' })
             ).resolves.not.toThrow();
         });
+
+        test('should resolve when valid html param is provided', async () => {
+            await expect(
+                emailClient.send({ to: 'test@example.com', subject: 'Test', html: '<p>Hello</p>' })
+            ).resolves.not.toThrow();
+        });
+
+        test('should load and send HTML from a file when htmlFile is provided', async () => {
+            const tmpFile = path.join(os.tmpdir(), `unit-test-email-${Date.now()}.html`);
+            fs.writeFileSync(tmpFile, '<h1>From file</h1>', 'utf-8');
+
+            try {
+                await expect(
+                    emailClient.send({ to: 'test@example.com', subject: 'Test', htmlFile: tmpFile })
+                ).resolves.not.toThrow();
+            } finally {
+                fs.unlinkSync(tmpFile);
+            }
+        });
+
+        test('should throw when htmlFile path does not exist', async () => {
+            await expect(
+                emailClient.send({
+                    to: 'test@example.com',
+                    subject: 'Test',
+                    htmlFile: '/tmp/does-not-exist-at-all.html',
+                })
+            ).rejects.toThrow(/HTML file not found/);
+        });
     });
 
+    // ─── CLEAN() ─────────────────────────────────────────────────────
+
     describe('clean() logic', () => {
-        test('should successfully resolve when called with no filters (clean all)', async () => {
-            // This now hits the vi.mock('imapflow') fake ImapFlow instance
+        test('should resolve when called with no options (clean all)', async () => {
             await expect(emailClient.clean()).resolves.not.toThrow();
         });
 
-        test('should successfully resolve when called with specific filters', async () => {
+        test('should resolve when called with specific filters', async () => {
             await expect(
-                emailClient.clean({
-                    filters: [{ type: EmailFilterType.SUBJECT, value: 'Old Test' }]
-                })
+                emailClient.clean({ filters: [{ type: EmailFilterType.SUBJECT, value: 'Old Test' }] })
             ).resolves.not.toThrow();
+        });
+
+        test('should return 0 when search finds no matching UIDs', async () => {
+            mockSearch.mockResolvedValueOnce([]);
+            const count = await emailClient.clean({
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'no-match' }],
+            });
+            expect(count).toBe(0);
+            expect(mockMessageDelete).not.toHaveBeenCalled();
+        });
+
+        test('should return the number of deleted emails', async () => {
+            mockSearch.mockResolvedValueOnce([1, 2, 3]);
+            const count = await emailClient.clean({
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'batch' }],
+            });
+            expect(count).toBe(3);
+            expect(mockMessageDelete).toHaveBeenCalledWith([1, 2, 3], { uid: true });
+        });
+
+        test('should open the specified folder', async () => {
+            mockSearch.mockResolvedValueOnce([]);
+            await emailClient.clean({ folder: 'Sent' });
+            expect(mockMailboxOpen).toHaveBeenCalledWith('Sent');
         });
     });
 
-    // ─── EXISTING UNIT TESTS: Filter Logic ───────────────────────────
+    // ─── MARK() ──────────────────────────────────────────────────────
+
+    describe('mark() logic', () => {
+        test('should add \\Seen flag for READ action', async () => {
+            const count = await emailClient.mark({
+                action: EmailMarkAction.READ,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+            });
+            expect(count).toBe(1);
+            expect(mockMessageFlagsAdd).toHaveBeenCalledWith([1], ['\\Seen'], { uid: true });
+        });
+
+        test('should remove \\Seen flag for UNREAD action', async () => {
+            const count = await emailClient.mark({
+                action: EmailMarkAction.UNREAD,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+            });
+            expect(count).toBe(1);
+            expect(mockMessageFlagsRemove).toHaveBeenCalledWith([1], ['\\Seen'], { uid: true });
+        });
+
+        test('should add \\Flagged for FLAGGED action', async () => {
+            const count = await emailClient.mark({
+                action: EmailMarkAction.FLAGGED,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+            });
+            expect(count).toBe(1);
+            expect(mockMessageFlagsAdd).toHaveBeenCalledWith([1], ['\\Flagged'], { uid: true });
+        });
+
+        test('should remove \\Flagged for UNFLAGGED action', async () => {
+            const count = await emailClient.mark({
+                action: EmailMarkAction.UNFLAGGED,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+            });
+            expect(count).toBe(1);
+            expect(mockMessageFlagsRemove).toHaveBeenCalledWith([1], ['\\Flagged'], { uid: true });
+        });
+
+        test('should call messageMove for ARCHIVED action', async () => {
+            const count = await emailClient.mark({
+                action: EmailMarkAction.ARCHIVED,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+                archiveFolder: 'Archive',
+            });
+            expect(count).toBe(1);
+            expect(mockMessageMove).toHaveBeenCalledWith([1], 'Archive', { uid: true });
+        });
+
+        test('should add custom flag array when action is a string[]', async () => {
+            const count = await emailClient.mark({
+                action: ['\\Draft', '\\Answered'],
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+            });
+            expect(count).toBe(1);
+            expect(mockMessageFlagsAdd).toHaveBeenCalledWith([1], ['\\Draft', '\\Answered'], { uid: true });
+        });
+
+        test('should return 0 and not call any flag method when no UIDs match', async () => {
+            mockSearch.mockResolvedValueOnce([]);
+            const count = await emailClient.mark({
+                action: EmailMarkAction.READ,
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'no-match' }],
+            });
+            expect(count).toBe(0);
+            expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+        });
+
+        test('should throw for an unsupported action string', async () => {
+            await expect(
+                emailClient.mark({
+                    action: 'NONEXISTENT_ACTION' as unknown as EmailMarkAction,
+                    filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }],
+                })
+            ).rejects.toThrow(/Unsupported mark action/);
+        });
+    });
+
+    // ─── APPLYFILTERS() ──────────────────────────────────────────────
 
     describe('applyFilters() logic', () => {
         test('SUBJECT filter — exact match', () => {
@@ -116,8 +249,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'Your OTP Code' }),
                 makeEmail({ subject: 'Welcome aboard' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.SUBJECT, value: 'Your OTP Code' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].subject).toBe('Your OTP Code');
         });
@@ -127,8 +261,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ from: 'noreply@example.com' }),
                 makeEmail({ from: 'support@example.com' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.FROM, value: 'noreply@example.com' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.FROM, value: 'noreply@example.com' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].from).toBe('noreply@example.com');
         });
@@ -138,8 +273,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ html: '<p>Your verification code is 999</p>' }),
                 makeEmail({ html: '<p>Welcome to our service</p>' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.CONTENT, value: '<p>Your verification code is 999</p>' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.CONTENT, value: '<p>Your verification code is 999</p>' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].html).toContain('999');
         });
@@ -149,8 +285,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ html: '', text: 'Plain text OTP: 5678' }),
                 makeEmail({ html: '', text: 'Welcome email' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.CONTENT, value: 'Plain text OTP: 5678' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.CONTENT, value: 'Plain text OTP: 5678' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].text).toContain('5678');
         });
@@ -161,11 +298,10 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'OTP', from: 'support@example.com' }),
                 makeEmail({ subject: 'Welcome', from: 'noreply@example.com' }),
             ];
-            const filters: EmailFilter[] = [
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SUBJECT, value: 'OTP' },
                 { type: EmailFilterType.FROM, value: 'noreply@example.com' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].subject).toBe('OTP');
             expect(result[0].from).toBe('noreply@example.com');
@@ -176,12 +312,11 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'OTP', from: 'noreply@example.com', html: '<p>Code: 123</p>' }),
                 makeEmail({ subject: 'OTP', from: 'noreply@example.com', html: '<p>Code: 456</p>' }),
             ];
-            const filters: EmailFilter[] = [
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SUBJECT, value: 'OTP' },
                 { type: EmailFilterType.FROM, value: 'noreply@example.com' },
                 { type: EmailFilterType.CONTENT, value: '<p>Code: 456</p>' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].html).toContain('456');
         });
@@ -191,8 +326,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'Your OTP Code - Action Required' }),
                 makeEmail({ subject: 'Welcome aboard' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'otp code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.SUBJECT, value: 'otp code' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].subject).toBe('Your OTP Code - Action Required');
         });
@@ -202,8 +338,9 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ from: 'NoReply@Example.COM' }),
                 makeEmail({ from: 'support@other.com' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.FROM, value: 'noreply@example.com' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.FROM, value: 'noreply@example.com' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].from).toBe('NoReply@Example.COM');
         });
@@ -213,21 +350,19 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ html: '<h1>Your Verification Code is ABC123</h1>' }),
                 makeEmail({ html: '<p>Newsletter</p>' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.CONTENT, value: 'verification code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.CONTENT, value: 'verification code' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].html).toContain('ABC123');
         });
 
         test('Combined filters — partial fallback applies to all filters together', () => {
-            const candidates = [
-                makeEmail({ subject: 'Your OTP Code', from: 'NoReply@Example.COM' }),
-            ];
-            const filters: EmailFilter[] = [
+            const candidates = [makeEmail({ subject: 'Your OTP Code', from: 'NoReply@Example.COM' })];
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SUBJECT, value: 'otp' },
                 { type: EmailFilterType.FROM, value: 'noreply' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(1);
         });
 
@@ -237,18 +372,18 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'OTP' }),
                 makeEmail({ subject: 'Your OTP is ready' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'OTP' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.SUBJECT, value: 'OTP' },
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].subject).toBe('OTP');
         });
 
         test('SINCE filter is excluded from client-side matching', () => {
             const candidates = [makeEmail({ subject: 'Test Email' })];
-            const filters: EmailFilter[] = [
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SINCE, value: new Date('2025-01-01') },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(1);
         });
 
@@ -257,18 +392,18 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'Match' }),
                 makeEmail({ subject: 'No Match' }),
             ];
-            const filters: EmailFilter[] = [
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SINCE, value: new Date('2025-01-01') },
                 { type: EmailFilterType.SUBJECT, value: 'Match' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(1);
             expect(result[0].subject).toBe('Match');
         });
 
         test('No candidates — returns empty array', () => {
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'Anything' }];
-            const result = emailClient.applyFilters([], filters);
+            const result = emailClient.applyFilters([], [
+                { type: EmailFilterType.SUBJECT, value: 'Anything' },
+            ]);
             expect(result).toHaveLength(0);
         });
 
@@ -283,29 +418,26 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'Completely unrelated' }),
                 makeEmail({ subject: 'Also unrelated' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'OTP Code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.SUBJECT, value: 'OTP Code' },
+            ]);
             expect(result).toHaveLength(0);
         });
 
-        test('Combined filters — one filter matches but the other does not — returns empty', () => {
-            const candidates = [
-                makeEmail({ subject: 'OTP', from: 'support@other.com' }),
-            ];
-            const filters: EmailFilter[] = [
+        test('Combined filters — one matches but the other does not — returns empty', () => {
+            const candidates = [makeEmail({ subject: 'OTP', from: 'support@other.com' })];
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SUBJECT, value: 'OTP' },
                 { type: EmailFilterType.FROM, value: 'noreply@example.com' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(0);
         });
 
         test('CONTENT filter — no match in HTML or text — returns empty', () => {
-            const candidates = [
-                makeEmail({ html: '<p>Hello world</p>', text: 'Hello world' }),
-            ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.CONTENT, value: 'verification code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const candidates = [makeEmail({ html: '<p>Hello world</p>', text: 'Hello world' })];
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.CONTENT, value: 'verification code' },
+            ]);
             expect(result).toHaveLength(0);
         });
 
@@ -313,11 +445,10 @@ describe('EmailClient Unit Tests', () => {
             const candidates = [
                 makeEmail({ subject: 'Your OTP Code', from: 'totally-different@xyz.com' }),
             ];
-            const filters: EmailFilter[] = [
+            const result = emailClient.applyFilters(candidates, [
                 { type: EmailFilterType.SUBJECT, value: 'otp' },
                 { type: EmailFilterType.FROM, value: 'noreply@example.com' },
-            ];
-            const result = emailClient.applyFilters(candidates, filters);
+            ]);
             expect(result).toHaveLength(0);
         });
 
@@ -327,13 +458,179 @@ describe('EmailClient Unit Tests', () => {
                 makeEmail({ subject: 'OTP Code', from: 'noreply@example.com' }),
                 makeEmail({ subject: 'Welcome', from: 'support@example.com' }),
             ];
-            const filters: EmailFilter[] = [{ type: EmailFilterType.SUBJECT, value: 'OTP Code' }];
-            const result = emailClient.applyFilters(candidates, filters);
+            const result = emailClient.applyFilters(candidates, [
+                { type: EmailFilterType.SUBJECT, value: 'OTP Code' },
+            ]);
             expect(result).toHaveLength(2);
         });
     });
 
-    // ─── EXISTING UNIT TESTS: Validation ─────────────────────────────
+    // ─── BUILDSEARCHCRITERIA() ────────────────────────────────────────
+
+    describe('buildSearchCriteria() logic', () => {
+        test('maps SUBJECT filter to IMAP subject criterion', () => {
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.SUBJECT, value: 'Hello' },
+            ]);
+            expect(criteria).toMatchObject({ subject: 'Hello' });
+        });
+
+        test('maps FROM filter to IMAP from criterion', () => {
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.FROM, value: 'sender@example.com' },
+            ]);
+            expect(criteria).toMatchObject({ from: 'sender@example.com' });
+        });
+
+        test('maps TO filter to IMAP to criterion', () => {
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.TO, value: 'receiver@example.com' },
+            ]);
+            expect(criteria).toMatchObject({ to: 'receiver@example.com' });
+        });
+
+        test('maps CONTENT filter to IMAP body criterion', () => {
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.CONTENT, value: 'secret code' },
+            ]);
+            expect(criteria).toMatchObject({ body: 'secret code' });
+        });
+
+        test('maps SINCE filter to IMAP since criterion', () => {
+            const since = new Date('2025-01-01');
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.SINCE, value: since },
+            ]);
+            expect(criteria).toMatchObject({ since });
+        });
+
+        test('combines multiple filters into one criteria object (AND logic)', () => {
+            const since = new Date('2025-01-01');
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.SUBJECT, value: 'OTP' },
+                { type: EmailFilterType.FROM, value: 'noreply@example.com' },
+                { type: EmailFilterType.SINCE, value: since },
+            ]);
+            expect(criteria).toMatchObject({
+                subject: 'OTP',
+                from: 'noreply@example.com',
+                since,
+            });
+        });
+
+        test('ignores duplicate filter types at the IMAP level (relies on client-side filtering)', () => {
+            const criteria = (emailClient as any).buildSearchCriteria([
+                { type: EmailFilterType.SUBJECT, value: 'First' },
+                { type: EmailFilterType.SUBJECT, value: 'Second' },
+            ]);
+            expect(criteria.subject).toBe('First');
+        });
+
+        test('throws for an unknown filter type', () => {
+            expect(() =>
+                (emailClient as any).buildSearchCriteria([
+                    { type: 'UNKNOWN_TYPE', value: 'something' },
+                ])
+            ).toThrow(/Unknown email filter type/);
+        });
+    });
+
+    // ─── EXTRACT*FROMSOURCE() ─────────────────────────────────────────
+
+    describe('extractHtmlFromSource() / extractTextFromSource() logic', () => {
+        test('returns empty string for an empty source', () => {
+            expect((emailClient as any).extractHtmlFromSource('')).toBe('');
+            expect((emailClient as any).extractTextFromSource('')).toBe('');
+        });
+
+        test('extracts HTML from a multipart/alternative source', () => {
+            const source = [
+                'Content-Type: multipart/alternative; boundary="bound"',
+                '',
+                '--bound',
+                'Content-Type: text/plain; charset="utf-8"',
+                '',
+                'Plain fallback',
+                '--bound',
+                'Content-Type: text/html; charset="utf-8"',
+                '',
+                '<p>HTML content</p>',
+                '--bound--',
+            ].join('\r\n');
+            expect((emailClient as any).extractHtmlFromSource(source)).toContain('<p>HTML content</p>');
+        });
+
+        test('extracts plain text from a multipart/alternative source', () => {
+            const source = [
+                'Content-Type: multipart/alternative; boundary="bound"',
+                '',
+                '--bound',
+                'Content-Type: text/plain; charset="utf-8"',
+                '',
+                'Plain fallback',
+                '--bound',
+                'Content-Type: text/html; charset="utf-8"',
+                '',
+                '<p>HTML content</p>',
+                '--bound--',
+            ].join('\r\n');
+            expect((emailClient as any).extractTextFromSource(source)).toContain('Plain fallback');
+        });
+
+        test('decodes base64-encoded HTML part', () => {
+            const encoded = Buffer.from('<p>decoded</p>').toString('base64');
+            const source = [
+                'Content-Type: multipart/alternative; boundary="b"',
+                '',
+                '--b',
+                'Content-Type: text/html; charset="utf-8"',
+                'Content-Transfer-Encoding: base64',
+                '',
+                encoded,
+                '--b--',
+            ].join('\r\n');
+            expect((emailClient as any).extractHtmlFromSource(source)).toContain('<p>decoded</p>');
+        });
+
+        test('decodes quoted-printable using latin-1 safe characters', () => {
+            const source = [
+                'Content-Type: multipart/alternative; boundary="b"',
+                '',
+                '--b',
+                'Content-Type: text/plain; charset="utf-8"',
+                'Content-Transfer-Encoding: quoted-printable',
+                '',
+                'caf=E9',
+                '--b--',
+            ].join('\r\n');
+            expect((emailClient as any).extractTextFromSource(source)).toContain('caf\u00e9');
+        });
+
+        test('returns empty string when the requested content-type is absent', () => {
+            const source = [
+                'Content-Type: multipart/alternative; boundary="b"',
+                '',
+                '--b',
+                'Content-Type: text/plain; charset="utf-8"',
+                '',
+                'Only plain text.',
+                '--b--',
+            ].join('\r\n');
+            expect((emailClient as any).extractHtmlFromSource(source)).toBe('');
+        });
+
+        test('extracts from a non-multipart single-part source', () => {
+            const source = [
+                'Content-Type: text/plain; charset="utf-8"',
+                'Content-Transfer-Encoding: 7bit',
+                '',
+                'Single part body.',
+            ].join('\r\n');
+            expect((emailClient as any).extractTextFromSource(source)).toContain('Single part body.');
+        });
+    });
+
+    // ─── VALIDATION ──────────────────────────────────────────────────
 
     describe('Validation', () => {
         test('receive() throws when filters array is empty', async () => {
