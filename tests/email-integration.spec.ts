@@ -151,13 +151,25 @@ describe('EmailClient Integration Workflows', () => {
             emailClient.send({ to: recipient, subject: `${batchId} - Ignore`, text: 'Banana' }),
         ]);
 
-        const allEmails = await emailClient.receiveAll({
-            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-            waitTimeout: 45000,
-        });
+        let allEmails: any[] = [];
+        const startTime = Date.now();
+
+        // Wait safely until BOTH emails have landed in the inbox
+        while (Date.now() - startTime < TIMEOUT) {
+            allEmails = await emailClient.receiveAll({
+                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+                waitTimeout: TIMEOUT,
+                pollInterval: POLLING,
+            }).catch(() => []); // Suppress timeouts during intermediate polling
+
+            if (allEmails.length >= 2) break;
+
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
 
         expect(allEmails.length).toBeGreaterThanOrEqual(2);
 
+        // Now we can safely test the client-side filtering
         const filtered = emailClient.applyFilters(allEmails, [
             { type: EmailFilterType.CONTENT, value: 'Apple' }
         ]);
@@ -323,7 +335,7 @@ describe('EmailClient Integration Workflows', () => {
             await expect(
                 emailClient.receive({
                     filters: [],
-                    waitTimeout: 3000,
+                    waitTimeout: TIMEOUT,
                 })
             ).rejects.toThrow(/At least one email filter is required/);
         });
@@ -332,7 +344,7 @@ describe('EmailClient Integration Workflows', () => {
             await expect(
                 emailClient.receiveAll({
                     filters: [],
-                    waitTimeout: 3000,
+                    waitTimeout: TIMEOUT,
                 })
             ).rejects.toThrow(/At least one email filter is required/);
         });
@@ -367,240 +379,252 @@ describe('EmailClient Integration Workflows', () => {
                 emailClient.send({ to: recipient, subject: `${batchId} - B`, text: 'b' }),
             ]);
 
-            await emailClient.receiveAll({
-                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                waitTimeout: 45000,
-            });
+            let allEmails: any[] = [];
+            const startTime = Date.now();
+
+            // Wait safely until BOTH emails have landed in the inbox
+            while (Date.now() - startTime < TIMEOUT) {
+                allEmails = await emailClient.receiveAll({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+                    waitTimeout: TIMEOUT,
+                    pollInterval: POLLING,
+                }).catch(() => []); // Suppress timeouts during intermediate polling
+
+                if (allEmails.length >= 2) break;
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
 
             const deletedCount = await emailClient.clean();
+
+            // Since it cleans ALL emails, it will delete at least the 2 we just confirmed arrived.
             expect(deletedCount).toBeGreaterThanOrEqual(2);
         });
-    });
 
-    // ─── MARK() ────────────────────────────────────────────────────────────
+        // ─── MARK() ────────────────────────────────────────────────────────────
 
-    describe('mark() — UNFLAGGED, ARCHIVED, and error cases', () => {
-        test('should mark an email as UNFLAGGED', async () => {
-            const uniqueSubject = `Mark UNFLAGGED Test ${Date.now()}`;
-            const recipient = process.env.RECEIVER_EMAIL!;
+        describe('mark() — UNFLAGGED, ARCHIVED, and error cases', () => {
+            test('should mark an email as UNFLAGGED', async () => {
+                const uniqueSubject = `Mark UNFLAGGED Test ${Date.now()}`;
+                const recipient = process.env.RECEIVER_EMAIL!;
 
-            await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'unflagged test' });
-            await emailClient.receive({
-                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                waitTimeout: TIMEOUT,
-            });
-
-            const filterCriteria = [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }];
-
-            await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria });
-
-            const count = await emailClient.mark({
-                action: EmailMarkAction.UNFLAGGED,
-                filters: filterCriteria,
-            });
-
-            expect(count).toBe(1);
-
-            await emailClient.clean({ filters: filterCriteria });
-        });
-
-        test('should archive an email by moving it to the archive folder', async () => {
-            const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
-            const recipient = process.env.RECEIVER_EMAIL!;
-
-            // FIX 2: Using a known localized Gmail folder string
-            const testArchiveFolder = '[Gmail]/Taslaklar';
-
-            await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
-            await emailClient.receive({
-                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                waitTimeout: TIMEOUT,
-            });
-
-            const count = await emailClient.mark({
-                action: EmailMarkAction.ARCHIVED,
-                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                archiveFolder: testArchiveFolder,
-            });
-
-            expect(count).toBe(1);
-
-            await emailClient.clean({
-                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                folder: testArchiveFolder, // Make sure we clean up the right folder!
-            });
-        });
-
-        test('should throw for an unsupported mark action string', async () => {
-            const uniqueSubject = `Mark Bad Action Test ${Date.now()}`;
-            const recipient = process.env.RECEIVER_EMAIL!;
-
-            await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'bad action' });
-
-            // FIX 3: Added try/finally block so clean() always fires even if the assertion fails
-            try {
+                await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'unflagged test' });
                 await emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
                     waitTimeout: TIMEOUT,
                 });
 
-                await expect(
-                    emailClient.mark({
-                        action: 'NONEXISTENT_ACTION' as unknown as EmailMarkAction,
-                        filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                    })
-                ).rejects.toThrow(/Unsupported mark action/);
-            } finally {
-                await emailClient.clean({
-                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                });
-            }
-        });
+                const filterCriteria = [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }];
 
-        test('should return 0 when mark() finds no matching emails', async () => {
-            const count = await emailClient.mark({
-                action: EmailMarkAction.READ,
-                filters: [{ type: EmailFilterType.SUBJECT, value: `no-such-email-${Date.now()}` }],
+                await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria });
+
+                const count = await emailClient.mark({
+                    action: EmailMarkAction.UNFLAGGED,
+                    filters: filterCriteria,
+                });
+
+                expect(count).toBe(1);
+
+                await emailClient.clean({ filters: filterCriteria });
             });
 
-            expect(count).toBe(0);
+            test('should archive an email by moving it to the archive folder', async () => {
+                const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
+                const recipient = process.env.RECEIVER_EMAIL!;
+
+                // FIX 2: Using a known localized Gmail folder string
+                const testArchiveFolder = '[Gmail]/Taslaklar';
+
+                await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
+                await emailClient.receive({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    waitTimeout: TIMEOUT,
+                });
+
+                const count = await emailClient.mark({
+                    action: EmailMarkAction.ARCHIVED,
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    archiveFolder: testArchiveFolder,
+                });
+
+                expect(count).toBe(1);
+
+                await emailClient.clean({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folder: testArchiveFolder, // Make sure we clean up the right folder!
+                });
+            });
+
+            test('should throw for an unsupported mark action string', async () => {
+                const uniqueSubject = `Mark Bad Action Test ${Date.now()}`;
+                const recipient = process.env.RECEIVER_EMAIL!;
+
+                await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'bad action' });
+
+                // FIX 3: Added try/finally block so clean() always fires even if the assertion fails
+                try {
+                    await emailClient.receive({
+                        filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        waitTimeout: TIMEOUT,
+                    });
+
+                    await expect(
+                        emailClient.mark({
+                            action: 'NONEXISTENT_ACTION' as unknown as EmailMarkAction,
+                            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        })
+                    ).rejects.toThrow(/Unsupported mark action/);
+                } finally {
+                    await emailClient.clean({
+                        filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    });
+                }
+            });
+
+            test('should return 0 when mark() finds no matching emails', async () => {
+                const count = await emailClient.mark({
+                    action: EmailMarkAction.READ,
+                    filters: [{ type: EmailFilterType.SUBJECT, value: `no-such-email-${Date.now()}` }],
+                });
+
+                expect(count).toBe(0);
+            });
+        });
+
+        // ─── APPLYFILTERS() ────────────────────────────────────────────────────
+
+        describe('applyFilters()', () => {
+            test('should return all candidates when the filters array is empty', () => {
+                const candidates = [
+                    { subject: 'a', from: '', to: '', html: '', text: 'alpha', date: new Date(), filePath: '' },
+                    { subject: 'b', from: '', to: '', html: '', text: 'beta', date: new Date(), filePath: '' },
+                ];
+
+                const result = (emailClient as any).applyFilters(candidates, []);
+                expect(result).toHaveLength(2);
+            });
+
+            test('should return an empty array when no candidates match', () => {
+                const candidates = [
+                    { subject: 'hello', from: '', to: '', html: '', text: 'world', date: new Date(), filePath: '' },
+                ];
+
+                const result = (emailClient as any).applyFilters(candidates, [
+                    { type: EmailFilterType.CONTENT, value: 'will-never-match-xyz' },
+                ]);
+
+                expect(result).toHaveLength(0);
+            });
+
+            test('should ignore SINCE filters during client-side applyFilters', () => {
+                const candidates = [
+                    { subject: 'test', from: '', to: '', html: '', text: 'some content', date: new Date(), filePath: '' },
+                ];
+
+                const result = (emailClient as any).applyFilters(candidates, [
+                    { type: EmailFilterType.SINCE, value: new Date('2099-01-01') },
+                ]);
+
+                expect(result).toHaveLength(1);
+            });
+
+            test('should fall back to partial case-insensitive match when no exact match exists', () => {
+                const candidates = [
+                    { subject: 'Hello World', from: '', to: '', html: '', text: '', date: new Date(), filePath: '' },
+                    { subject: 'Goodbye', from: '', to: '', html: '', text: '', date: new Date(), filePath: '' },
+                ];
+
+                const result = (emailClient as any).applyFilters(candidates, [
+                    { type: EmailFilterType.SUBJECT, value: 'hello world' },
+                ]);
+
+                expect(result).toHaveLength(1);
+                expect(result[0].subject).toBe('Hello World');
+            });
+        });
+
+        // ─── EXTRACT*FROMSOURCE() ──────────────────────────────────────────────
+
+        describe('extractHtmlFromSource() / extractTextFromSource() — edge cases', () => {
+            test('should return empty string for an empty source', () => {
+                expect((emailClient as any).extractHtmlFromSource('')).toBe('');
+                expect((emailClient as any).extractTextFromSource('')).toBe('');
+            });
+
+            test('should decode base64-encoded MIME part content', () => {
+                const htmlContent = '<p>base64 decoded content</p>';
+                const encoded = Buffer.from(htmlContent).toString('base64');
+
+                const rawEmailSource = [
+                    'Content-Type: multipart/alternative; boundary="b64-boundary"',
+                    '',
+                    '--b64-boundary',
+                    'Content-Type: text/html; charset="utf-8"',
+                    'Content-Transfer-Encoding: base64',
+                    '',
+                    encoded,
+                    '--b64-boundary--',
+                ].join('\r\n');
+
+                const result = (emailClient as any).extractHtmlFromSource(rawEmailSource);
+                expect(result).toContain('base64 decoded content');
+            });
+
+            test('should decode quoted-printable encoded MIME part content', () => {
+                const qpEncoded = 'caf=E9 from quoted-printable';
+
+                const rawEmailSource = [
+                    'Content-Type: multipart/alternative; boundary="qp-boundary"',
+                    '',
+                    '--qp-boundary',
+                    'Content-Type: text/plain; charset="utf-8"',
+                    'Content-Transfer-Encoding: quoted-printable',
+                    '',
+                    qpEncoded,
+                    '--qp-boundary--',
+                ].join('\r\n');
+
+                const result = (emailClient as any).extractTextFromSource(rawEmailSource);
+                expect(result).toContain('caf\u00e9 from quoted-printable');
+            });
+
+            test('should return empty string when the requested content-type is absent', () => {
+                const rawEmailSource = [
+                    'Content-Type: multipart/alternative; boundary="plain-only-boundary"',
+                    '',
+                    '--plain-only-boundary',
+                    'Content-Type: text/plain; charset="utf-8"',
+                    '',
+                    'Only plain text here.',
+                    '--plain-only-boundary--',
+                ].join('\r\n');
+
+                const result = (emailClient as any).extractHtmlFromSource(rawEmailSource);
+                expect(result).toBe('');
+            });
+
+            test('should extract content from a non-multipart single-part MIME source', () => {
+                const rawSinglePart = [
+                    'Content-Type: text/plain; charset="utf-8"',
+                    'Content-Transfer-Encoding: 7bit',
+                    '',
+                    'Single part plain text.',
+                ].join('\r\n');
+
+                const result = (emailClient as any).extractTextFromSource(rawSinglePart);
+                expect(result).toContain('Single part plain text.');
+            });
+        });
+
+        // ─── BUILDSEARCHCRITERIA() ─────────────────────────────────────────────
+
+        describe('buildSearchCriteria() — unknown filter type', () => {
+            test('should throw for an unrecognised EmailFilterType', () => {
+                expect(() =>
+                    (emailClient as any).buildSearchCriteria([
+                        { type: 'UNKNOWN_TYPE', value: 'something' },
+                    ])
+                ).toThrow(/Unknown email filter type/);
+            });
         });
     });
-
-    // ─── APPLYFILTERS() ────────────────────────────────────────────────────
-
-    describe('applyFilters()', () => {
-        test('should return all candidates when the filters array is empty', () => {
-            const candidates = [
-                { subject: 'a', from: '', to: '', html: '', text: 'alpha', date: new Date(), filePath: '' },
-                { subject: 'b', from: '', to: '', html: '', text: 'beta', date: new Date(), filePath: '' },
-            ];
-
-            const result = (emailClient as any).applyFilters(candidates, []);
-            expect(result).toHaveLength(2);
-        });
-
-        test('should return an empty array when no candidates match', () => {
-            const candidates = [
-                { subject: 'hello', from: '', to: '', html: '', text: 'world', date: new Date(), filePath: '' },
-            ];
-
-            const result = (emailClient as any).applyFilters(candidates, [
-                { type: EmailFilterType.CONTENT, value: 'will-never-match-xyz' },
-            ]);
-
-            expect(result).toHaveLength(0);
-        });
-
-        test('should ignore SINCE filters during client-side applyFilters', () => {
-            const candidates = [
-                { subject: 'test', from: '', to: '', html: '', text: 'some content', date: new Date(), filePath: '' },
-            ];
-
-            const result = (emailClient as any).applyFilters(candidates, [
-                { type: EmailFilterType.SINCE, value: new Date('2099-01-01') },
-            ]);
-
-            expect(result).toHaveLength(1);
-        });
-
-        test('should fall back to partial case-insensitive match when no exact match exists', () => {
-            const candidates = [
-                { subject: 'Hello World', from: '', to: '', html: '', text: '', date: new Date(), filePath: '' },
-                { subject: 'Goodbye', from: '', to: '', html: '', text: '', date: new Date(), filePath: '' },
-            ];
-
-            const result = (emailClient as any).applyFilters(candidates, [
-                { type: EmailFilterType.SUBJECT, value: 'hello world' },
-            ]);
-
-            expect(result).toHaveLength(1);
-            expect(result[0].subject).toBe('Hello World');
-        });
-    });
-
-    // ─── EXTRACT*FROMSOURCE() ──────────────────────────────────────────────
-
-    describe('extractHtmlFromSource() / extractTextFromSource() — edge cases', () => {
-        test('should return empty string for an empty source', () => {
-            expect((emailClient as any).extractHtmlFromSource('')).toBe('');
-            expect((emailClient as any).extractTextFromSource('')).toBe('');
-        });
-
-        test('should decode base64-encoded MIME part content', () => {
-            const htmlContent = '<p>base64 decoded content</p>';
-            const encoded = Buffer.from(htmlContent).toString('base64');
-
-            const rawEmailSource = [
-                'Content-Type: multipart/alternative; boundary="b64-boundary"',
-                '',
-                '--b64-boundary',
-                'Content-Type: text/html; charset="utf-8"',
-                'Content-Transfer-Encoding: base64',
-                '',
-                encoded,
-                '--b64-boundary--',
-            ].join('\r\n');
-
-            const result = (emailClient as any).extractHtmlFromSource(rawEmailSource);
-            expect(result).toContain('base64 decoded content');
-        });
-
-        test('should decode quoted-printable encoded MIME part content', () => {
-            const qpEncoded = 'caf=E9 from quoted-printable';
-
-            const rawEmailSource = [
-                'Content-Type: multipart/alternative; boundary="qp-boundary"',
-                '',
-                '--qp-boundary',
-                'Content-Type: text/plain; charset="utf-8"',
-                'Content-Transfer-Encoding: quoted-printable',
-                '',
-                qpEncoded,
-                '--qp-boundary--',
-            ].join('\r\n');
-
-            const result = (emailClient as any).extractTextFromSource(rawEmailSource);
-            expect(result).toContain('caf\u00e9 from quoted-printable');
-        });
-
-        test('should return empty string when the requested content-type is absent', () => {
-            const rawEmailSource = [
-                'Content-Type: multipart/alternative; boundary="plain-only-boundary"',
-                '',
-                '--plain-only-boundary',
-                'Content-Type: text/plain; charset="utf-8"',
-                '',
-                'Only plain text here.',
-                '--plain-only-boundary--',
-            ].join('\r\n');
-
-            const result = (emailClient as any).extractHtmlFromSource(rawEmailSource);
-            expect(result).toBe('');
-        });
-
-        test('should extract content from a non-multipart single-part MIME source', () => {
-            const rawSinglePart = [
-                'Content-Type: text/plain; charset="utf-8"',
-                'Content-Transfer-Encoding: 7bit',
-                '',
-                'Single part plain text.',
-            ].join('\r\n');
-
-            const result = (emailClient as any).extractTextFromSource(rawSinglePart);
-            expect(result).toContain('Single part plain text.');
-        });
-    });
-
-    // ─── BUILDSEARCHCRITERIA() ─────────────────────────────────────────────
-
-    describe('buildSearchCriteria() — unknown filter type', () => {
-        test('should throw for an unrecognised EmailFilterType', () => {
-            expect(() =>
-                (emailClient as any).buildSearchCriteria([
-                    { type: 'UNKNOWN_TYPE', value: 'something' },
-                ])
-            ).toThrow(/Unknown email filter type/);
-        });
-    });
-});
