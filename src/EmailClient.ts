@@ -1,10 +1,10 @@
+import { simpleParser, AddressObject } from 'mailparser';
+import { createLogger } from './logger.js';
 import * as nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
-import { simpleParser, AddressObject } from 'mailparser';
-import * as fs from 'fs';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as os from 'os';
-import { createLogger } from './logger';
 import {
     EmailSendOptions,
     EmailReceiveOptions,
@@ -14,7 +14,7 @@ import {
     EmailFilter,
     EmailMarkOptions,
     EmailMarkAction
-} from './types';
+} from './types.js';
 
 const log = createLogger('imap');
 const smtpLog = createLogger('smtp');
@@ -237,7 +237,7 @@ export class EmailClient {
 
                 const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir);
                 const newMatches = this.applyFilters(candidates, filters);
-                
+
                 accumulatedMatches.push(...newMatches);
 
                 if (accumulatedMatches.length >= expectedCount) {
@@ -249,7 +249,7 @@ export class EmailClient {
                 } else {
                     log('No matching email(s) found yet, retrying in %dms...', pollInterval);
                 }
-                
+
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
             }
 

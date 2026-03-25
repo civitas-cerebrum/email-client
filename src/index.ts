@@ -1,2 +1,2 @@
-export { EmailClient } from './EmailClient';
-export * from './types';
+export { EmailClient } from './EmailClient.js';
+export * from './types.js';

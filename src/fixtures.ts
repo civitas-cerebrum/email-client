@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { EmailClient } from './EmailClient';
-import { EmailCredentials } from './types';
+import { EmailClient } from './EmailClient.js';
+import { EmailCredentials } from './types.js';
 import * as dotenv from 'dotenv';
 
 // Load .env for local testing; in CI the vars come from GitHub Actions secrets
