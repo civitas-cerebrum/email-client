@@ -76,6 +76,8 @@ export interface EmailReceiveOptions {
     waitTimeout?: number;
     /** Interval between poll attempts (ms). Defaults to 3000. */
     pollInterval?: number;
+    /** Specific number of expected results */
+    expectedCount?: number;
     /** Directory to save downloaded email HTML. Defaults to os.tmpdir()/pw-emails. */
     downloadDir?: string;
 }

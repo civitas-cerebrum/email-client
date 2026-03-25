@@ -220,12 +220,13 @@ export class EmailClient {
      * Manages IMAP connection, continuous retry logic, timeout enforcement, and cleanup.
      */
     private async _pollMailbox(options: EmailReceiveOptions, returnAll: boolean): Promise<ReceivedEmail | ReceivedEmail[]> {
-        const { filters, folder = 'INBOX', waitTimeout = 30000, pollInterval = 3000, downloadDir } = options;
+        const { filters, folder = 'INBOX', waitTimeout = 30000, pollInterval = 3000, downloadDir, expectedCount = 1 } = options;
         this.validateFilters(filters);
 
         const deadline = Date.now() + waitTimeout;
         const client = this.createImapClient();
         const seenUids = new Set<number>();
+        const accumulatedMatches: ReceivedEmail[] = []; // Track across polling cycles
 
         try {
             await client.connect();
@@ -235,17 +236,24 @@ export class EmailClient {
                 await client.mailboxOpen(folder);
 
                 const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir);
-                const matches = this.applyFilters(candidates, filters);
+                const newMatches = this.applyFilters(candidates, filters);
+                
+                accumulatedMatches.push(...newMatches);
 
-                if (matches.length > 0) {
-                    return returnAll ? matches : matches[matches.length - 1];
+                if (accumulatedMatches.length >= expectedCount) {
+                    return returnAll ? accumulatedMatches : accumulatedMatches[accumulatedMatches.length - 1];
                 }
 
-                log('No matching email(s) found yet, retrying in %dms...', pollInterval);
+                if (returnAll) {
+                    log('Found %d/%d email(s), retrying in %dms...', accumulatedMatches.length, expectedCount, pollInterval);
+                } else {
+                    log('No matching email(s) found yet, retrying in %dms...', pollInterval);
+                }
+                
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
             }
 
-            throw new Error(`No email matching criteria found within ${waitTimeout}ms. Searched in "${folder}" for: ${this.formatFilterSummary(filters)}`);
+            throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${folder}" for: ${this.formatFilterSummary(filters)}`);
         } finally {
             try { await client.logout(); } catch { /* ignore */ }
         }
@@ -372,7 +380,7 @@ export class EmailClient {
             throw new Error('At least one email filter is required. Use EmailFilterType to specify filter criteria.');
         }
     }
-    
+
     /** Maps standard `EmailFilter` objects to IMAP-compatible search criteria. */
     private buildSearchCriteria(filters: EmailFilter[]): Record<string, any> {
         const criteria: Record<string, any> = {};
