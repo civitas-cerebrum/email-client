@@ -97,3 +97,28 @@ export interface ReceivedEmail {
     /** Plain-text content. */
     text: string;
 }
+
+/**
+ * Predefined actions for modifying email flags or state.
+ */
+export enum EmailMarkAction {
+    READ = 'READ',
+    UNREAD = 'UNREAD',
+    FLAGGED = 'FLAGGED',
+    UNFLAGGED = 'UNFLAGGED',
+    ARCHIVED = 'ARCHIVED'
+}
+
+/**
+ * Options for marking or modifying emails in the mailbox.
+ */
+export interface EmailMarkOptions {
+    /** A predefined `EmailMarkAction` enum, or an array of standard IMAP flags (e.g., `['\\Draft']`). */
+    action: EmailMarkAction | string[];
+    /** Filters to identify which emails should be marked. If omitted, applies to all emails in the folder. */
+    filters?: EmailFilter[];
+    /** The target mailbox folder to perform the action in. Defaults to 'INBOX'. */
+    folder?: string;
+    /** The destination folder used when the `ARCHIVED` action is triggered. Defaults to 'Archive'. */
+    archiveFolder?: string;
+}

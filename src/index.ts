@@ -5,5 +5,7 @@ export {
     EmailFilter,
     EmailSendOptions,
     EmailReceiveOptions,
+    EmailMarkAction,
+    EmailMarkOptions,
     ReceivedEmail
 } from './types';
