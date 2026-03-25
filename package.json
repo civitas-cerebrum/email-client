@@ -1,6 +1,6 @@
 {
   "name": "@civitas-cerebrum/email-client",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A generic SMTP/IMAP email client for test automation. Send, receive, search, and clean emails with composable filters.",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
     "nodemailer": "^8.0.3"
   },
   "devDependencies": {
-    "@civitas-cerebrum/test-coverage": "^0.0.6",
+    "@civitas-cerebrum/test-coverage": "^0.0.8",
     "@types/debug": "^4.1.13",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.0.0",
