@@ -1,6 +1,6 @@
 # @civitas-cerebrum/email-client
 
-[](https://www.npmjs.com/package/@civitas-cerebrum/email-client)
+[![NPM Version](https://img.shields.io/npm/v/@civitas-cerebrum/email-client?color=rgb(88%2C%20171%2C%2070))](https://www.npmjs.com/package/@civitas-cerebrum/email-client)
 
 A highly robust, zero-dependency SMTP/IMAP email client built specifically for E2E test automation. Send, receive, search, manage, and clean emails using composable, deterministic filters.
 
