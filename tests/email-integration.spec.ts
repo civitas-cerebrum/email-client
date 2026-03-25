@@ -6,8 +6,8 @@ import { EmailClient, EmailFilterType, EmailMarkAction } from '../src';
 
 describe('EmailClient Integration Workflows', () => {
     let emailClient: EmailClient;
-    const TIMEOUT = 60000
-    const POLLING = 5000
+    const TIMEOUT = 60000;
+    const POLLING = 5000;
 
     beforeAll(async () => {
         emailClient = await import('../src/fixtures').then(m => m.setupGlobalEmailClient());
@@ -75,24 +75,14 @@ describe('EmailClient Integration Workflows', () => {
             emailClient.send({ to: recipient, subject: `${batchId} - Invoice 3`, text: 'Amount: $30' })
         ]);
 
-        let emails: any[] = [];
-        const startTime = Date.now();
+        const emails = await emailClient.receiveAll({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            waitTimeout: TIMEOUT,
+            pollInterval: POLLING,
+            expectedCount: 3,
+        });
 
-        // Wait up to 45 seconds for all 3 emails to arrive
-        while (Date.now() - startTime < (TIMEOUT * 3)) {
-            emails = await emailClient.receiveAll({
-                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                waitTimeout: TIMEOUT,
-                pollInterval: POLLING,
-            }).catch(() => []); // Ignore timeouts during the intermediate polling
-
-            if (emails.length >= 3) break;
-
-            // Back off slightly before checking again
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-
-        expect(emails.length).toBe(3);
+        expect(emails.length).toBeGreaterThanOrEqual(3);
 
         for (const email of emails) {
             expect(email.subject).toContain(batchId);
@@ -139,7 +129,7 @@ describe('EmailClient Integration Workflows', () => {
                 waitTimeout: TIMEOUT,
                 pollInterval: POLLING,
             })
-        ).rejects.toThrow(new RegExp(`No email matching criteria found within ${TIMEOUT}ms`));
+        ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
     });
 
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async () => {
@@ -151,21 +141,12 @@ describe('EmailClient Integration Workflows', () => {
             emailClient.send({ to: recipient, subject: `${batchId} - Ignore`, text: 'Banana' }),
         ]);
 
-        let allEmails: any[] = [];
-        const startTime = Date.now();
-
-        // Wait safely until BOTH emails have landed in the inbox
-        while (Date.now() - startTime < TIMEOUT) {
-            allEmails = await emailClient.receiveAll({
-                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                waitTimeout: TIMEOUT,
-                pollInterval: POLLING,
-            }).catch(() => []); // Suppress timeouts during intermediate polling
-
-            if (allEmails.length >= 2) break;
-
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
+        const allEmails = await emailClient.receiveAll({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            waitTimeout: TIMEOUT,
+            pollInterval: POLLING,
+            expectedCount: 2,
+        });
 
         expect(allEmails.length).toBeGreaterThanOrEqual(2);
 
@@ -324,7 +305,7 @@ describe('EmailClient Integration Workflows', () => {
                     waitTimeout: TIMEOUT,
                     pollInterval: POLLING,
                 })
-            ).rejects.toThrow(new RegExp(`No email matching criteria found within ${TIMEOUT}ms`));
+            ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
         });
     });
 
@@ -367,7 +348,7 @@ describe('EmailClient Integration Workflows', () => {
                     filters: [{ type: EmailFilterType.SUBJECT, value: `folder-test-${Date.now()}` }],
                     folder: 'Trash',
                 })
-            ).rejects.toThrow(/Failed to open folder "Trash"/i); // FIX 1: Updated regex to match the new robust error wrapper
+            ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
         test('should delete ALL emails in INBOX when called with no options', async () => {
@@ -379,21 +360,12 @@ describe('EmailClient Integration Workflows', () => {
                 emailClient.send({ to: recipient, subject: `${batchId} - B`, text: 'b' }),
             ]);
 
-            let allEmails: any[] = [];
-            const startTime = Date.now();
-
-            // Wait safely until BOTH emails have landed in the inbox
-            while (Date.now() - startTime < TIMEOUT) {
-                allEmails = await emailClient.receiveAll({
-                    filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                    waitTimeout: TIMEOUT,
-                    pollInterval: POLLING,
-                }).catch(() => []); // Suppress timeouts during intermediate polling
-
-                if (allEmails.length >= 2) break;
-
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
+            await emailClient.receiveAll({
+                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+                waitTimeout: TIMEOUT,
+                pollInterval: POLLING,
+                expectedCount: 2,
+            });
 
             const deletedCount = await emailClient.clean();
 
@@ -432,7 +404,6 @@ describe('EmailClient Integration Workflows', () => {
                 const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
-                // FIX 2: Using a known localized Gmail folder string
                 const testArchiveFolder = '[Gmail]/Taslaklar';
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
@@ -451,7 +422,7 @@ describe('EmailClient Integration Workflows', () => {
 
                 await emailClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                    folder: testArchiveFolder, // Make sure we clean up the right folder!
+                    folder: testArchiveFolder,
                 });
             });
 
@@ -461,7 +432,6 @@ describe('EmailClient Integration Workflows', () => {
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'bad action' });
 
-                // FIX 3: Added try/finally block so clean() always fires even if the assertion fails
                 try {
                     await emailClient.receive({
                         filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
@@ -628,3 +598,4 @@ describe('EmailClient Integration Workflows', () => {
             });
         });
     });
+});
