@@ -119,11 +119,6 @@ export class EmailClient {
      * @param options Action details, filtering criteria, and target folder configuration.
      * @returns The number of emails successfully modified.
      */
-    /**
-     * Modifies the state or flags of emails in the mailbox (e.g., Read, Unread, Flagged, Archived).
-     * @param options Action details, filtering criteria, and target folder configuration.
-     * @returns The number of emails successfully modified.
-     */
     async mark(options: EmailMarkOptions): Promise<number> {
         const { action, filters, folder = 'INBOX', archiveFolder = 'Archive' } = options;
 
@@ -220,7 +215,7 @@ export class EmailClient {
      * Manages IMAP connection, continuous retry logic, timeout enforcement, and cleanup.
      */
     private async _pollMailbox(options: EmailReceiveOptions, returnAll: boolean): Promise<ReceivedEmail | ReceivedEmail[]> {
-        const { filters, folder = 'INBOX', waitTimeout = 30000, pollInterval = 3000, downloadDir, expectedCount = 1 } = options;
+        const { filters, folder = 'INBOX', waitTimeout = 30000, pollInterval = 3000, downloadDir, expectedCount = 1, maxFetchLimit = 50 } = options;
         this.validateFilters(filters);
 
         const deadline = Date.now() + waitTimeout;
@@ -235,7 +230,7 @@ export class EmailClient {
             while (Date.now() < deadline) {
                 await client.mailboxOpen(folder);
 
-                const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir);
+                const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir, maxFetchLimit);
                 const newMatches = this.applyFilters(candidates, filters);
 
                 accumulatedMatches.push(...newMatches);
@@ -255,7 +250,7 @@ export class EmailClient {
 
             throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${folder}" for: ${this.formatFilterSummary(filters)}`);
         } finally {
-            try { await client.logout(); } catch { /* ignore */ }
+            try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
         }
     }
 
@@ -315,7 +310,7 @@ export class EmailClient {
 
             return uids.length;
         } finally {
-            try { await client.logout(); } catch { /* ignore */ }
+            try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
         }
     }
 
@@ -402,7 +397,8 @@ export class EmailClient {
         client: ImapFlow,
         filters: EmailFilter[],
         seenUids: Set<number>,
-        downloadDir?: string
+        downloadDir?: string,
+        maxFetchLimit: number = 50
     ): Promise<ReceivedEmail[]> {
         const searchCriteria = this.buildSearchCriteria(filters);
         const uids = await client.search(searchCriteria);
@@ -411,14 +407,13 @@ export class EmailClient {
         const newUids = uids.filter(uid => !seenUids.has(uid));
         if (newUids.length === 0) return [];
 
-        // Safety measure: Prevent memory spikes by capping the raw MIME fetch to 50 emails.
-        const MAX_FETCH_LIMIT = 50;
-        const limitedUids = newUids.slice(-MAX_FETCH_LIMIT);
+        // Safety measure: Prevent memory spikes by capping the raw MIME fetch.
+        const limitedUids = newUids.slice(-maxFetchLimit);
 
-        if (newUids.length > MAX_FETCH_LIMIT) {
-            log('Warning: Found %d matching emails. Capping fetch limit to the %d most recent to conserve memory.', newUids.length, MAX_FETCH_LIMIT);
+        if (newUids.length > maxFetchLimit) {
+            log('Warning: Found %d matching emails. Capping fetch limit to the %d most recent to conserve memory.', newUids.length, maxFetchLimit);
             // Add the omitted UIDs to 'seen' so we don't fetch them in the next polling cycle
-            newUids.slice(0, -MAX_FETCH_LIMIT).forEach(uid => seenUids.add(uid));
+            newUids.slice(0, -maxFetchLimit).forEach(uid => seenUids.add(uid));
         }
 
         const candidates: ReceivedEmail[] = [];
