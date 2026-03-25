@@ -80,6 +80,8 @@ export interface EmailReceiveOptions {
     expectedCount?: number;
     /** Directory to save downloaded email HTML. Defaults to os.tmpdir()/pw-emails. */
     downloadDir?: string;
+    /** Maximum number of emails to fetch per polling cycle. Defaults to 50. */
+    maxFetchLimit?: number;
 }
 
 /**
