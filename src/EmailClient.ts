@@ -201,8 +201,12 @@ export class EmailClient {
                     log('Action UNFLAGGED applied to %d email(s) in "%s"', uids.length, folder);
                     break;
                 case EmailMarkAction.ARCHIVED:
-                    await client.messageMove(uids, archiveFolder, { uid: true });
-                    log('Archived %d email(s) from "%s" to "%s"', uids.length, folder, archiveFolder);
+                    const resolvedArchive = await this._resolveFolder(client, archiveFolder);
+                    const moveResult = await client.messageMove(uids, resolvedArchive, { uid: true });
+                    if (!moveResult) {
+                        throw new Error(`Failed to move ${uids.length} email(s) to "${resolvedArchive}". The server rejected the move.`);
+                    }
+                    log('Archived %d email(s) from "%s" to "%s"', uids.length, folder, resolvedArchive);
                     break;
             }
         });
@@ -272,8 +276,10 @@ export class EmailClient {
             await client.connect();
             this.logImapConnection();
 
+            const resolvedFolder = await this._resolveFolder(client, folder);
+
             while (Date.now() < deadline) {
-                await client.mailboxOpen(folder);
+                await client.mailboxOpen(resolvedFolder);
 
                 const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir, maxFetchLimit);
                 const newMatches = this.applyFilters(candidates, filters);
@@ -298,7 +304,7 @@ export class EmailClient {
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
             }
 
-            throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${folder}" for: ${this.formatFilterSummary(filters)}`);
+            throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${resolvedFolder}" for: ${this.formatFilterSummary(filters)}`);
         } finally {
             try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
         }
@@ -320,13 +326,15 @@ export class EmailClient {
             await client.connect();
             this.logImapConnection();
 
+            const resolvedFolder = await this._resolveFolder(client, folder);
+
             try {
-                await client.mailboxOpen(folder);
+                await client.mailboxOpen(resolvedFolder);
             } catch (err: any) {
                 if (err.serverResponseCode === 'NONEXISTENT' || err.message.includes('Unknown Mailbox')) {
                     const available = await this._listAvailableFolders(client);
                     throw new Error(
-                        `Failed to open folder "${folder}".\n` +
+                        `Failed to open folder "${resolvedFolder}".\n` +
                         `Available folders on this server: [${available.join(', ')}]\n` +
                         `Check your ARCHIVE_FOLDER or folder settings.`
                     );
@@ -378,6 +386,29 @@ export class EmailClient {
             return ['(could not retrieve list)'];
         }
         return folders;
+    }
+
+    /**
+     * Resolves a folder name to its actual IMAP path using `specialUse` metadata.
+     * Accepts either a literal path (e.g. '[Gmail]/Trash') or a specialUse role
+     * (e.g. '\\Trash', '\\All', '\\Sent', '\\Flagged', '\\Drafts', '\\Junk').
+     * Returns the original value if no specialUse match is found.
+     */
+    private async _resolveFolder(client: ImapFlow, folder: string): Promise<string> {
+        if (!folder.startsWith('\\')) return folder;
+
+        const list = await client.list();
+        for (const entry of list) {
+            if (entry.specialUse === folder) {
+                log('Resolved specialUse "%s" to folder "%s"', folder, entry.path);
+                return entry.path;
+            }
+        }
+
+        throw new Error(
+            `No folder with specialUse "${folder}" found on this server. ` +
+            `Available folders: [${(list as any[]).map((f: any) => `${f.path} (${f.specialUse || 'none'})`).join(', ')}]`
+        );
     }
 
     /** Instantiates an ImapFlow client using the provided credentials. */
@@ -464,7 +495,7 @@ export class EmailClient {
         }
 
         const candidates: ReceivedEmail[] = [];
-        for await (const msg of client.fetch(limitedUids, { source: true, uid: true })) {
+        for await (const msg of client.fetch(limitedUids, { source: true }, { uid: true })) {
             seenUids.add(msg.uid);
             candidates.push(await this.parseMessage(msg, downloadDir));
         }

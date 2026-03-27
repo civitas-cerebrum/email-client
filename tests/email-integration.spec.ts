@@ -22,7 +22,7 @@ async function getImapFlags(subject: string): Promise<Set<string>[]> {
         if (!uids || uids.length === 0) return [];
 
         const results: Set<string>[] = [];
-        for await (const msg of client.fetch(uids, { flags: true, uid: true })) {
+        for await (const msg of client.fetch(uids, { flags: true }, { uid: true })) {
             results.push(msg.flags);
         }
         return results;
@@ -570,7 +570,7 @@ describe('EmailClient Integration Workflows', () => {
                 const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
-                const testArchiveFolder = '[Gmail]/Taslaklar';
+                const testArchiveFolder = '\\Flagged';
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
                 await emailClient.receive({
@@ -585,6 +585,24 @@ describe('EmailClient Integration Workflows', () => {
                 });
 
                 expect(count).toBe(1);
+
+                // Verify the email is no longer in INBOX
+                await expect(
+                    emailClient.receive({
+                        filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        waitTimeout: 15000,
+                        pollInterval: POLLING,
+                    })
+                ).rejects.toThrow(/within 15000ms/);
+
+                // Verify the email arrived in the archive folder
+                const archived = await emailClient.receive({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folder: testArchiveFolder,
+                    waitTimeout: TIMEOUT,
+                    pollInterval: POLLING,
+                });
+                expect(archived.subject).toContain(uniqueSubject);
 
                 await emailClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],

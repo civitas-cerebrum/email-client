@@ -182,7 +182,7 @@ const allEmails = await client.receiveAll({
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `filters` | `EmailFilter[]` | — | **Required.** Array of filters (AND logic) |
-| `folder` | `string` | `'INBOX'` | IMAP folder to search |
+| `folder` | `string` | `'INBOX'` | IMAP folder to search. Accepts a literal path or a `specialUse` role (e.g. `'\\Sent'`, `'\\Trash'`) |
 | `waitTimeout` | `number` | `30000` | Max milliseconds to poll before throwing an error |
 | `pollInterval` | `number` | `3000` | Milliseconds to wait between IMAP fetch attempts |
 | `expectedCount` | `number` | `1` | Number of matching emails required before returning |
@@ -216,11 +216,11 @@ await client.mark({
     filters: [{ type: EmailFilterType.SUBJECT, value: 'Welcome' }]
 });
 
-// Move emails to an archive folder
+// Move emails to an archive folder (using specialUse role — works across all locales)
 await client.mark({
     action: EmailMarkAction.ARCHIVED,
     filters: [{ type: EmailFilterType.FROM, value: 'spam@example.com' }],
-    archiveFolder: 'Archive' // Note: This must match the server's localized folder name
+    archiveFolder: '\\Trash' // Resolves to the server's actual Trash path at runtime
 });
 
 // Apply custom IMAP flags
@@ -242,6 +242,26 @@ await client.clean({
 
 // Nuke the entire inbox (Use with caution!)
 await client.clean();
+```
+
+#### Folder Resolution
+
+Any `folder` or `archiveFolder` option accepts either a **literal path** (e.g. `'[Gmail]/Trash'`) or a **`specialUse` role** prefixed with `\`. The client resolves roles to the correct server path at runtime using IMAP LIST metadata, so your code works regardless of the mail server's language or naming conventions.
+
+| Role | Description |
+|---|---|
+| `\All` | All Mail |
+| `\Trash` | Trash / Deleted Items |
+| `\Sent` | Sent Mail |
+| `\Drafts` | Drafts |
+| `\Junk` | Spam |
+| `\Flagged` | Starred / Flagged |
+| `\Inbox` | Inbox |
+
+```ts
+// These are equivalent on a Turkish Gmail account:
+await client.clean({ folder: '[Gmail]/Çöp kutusu' }); // literal path
+await client.clean({ folder: '\\Trash' });             // specialUse role (locale-independent)
 ```
 
 -----
