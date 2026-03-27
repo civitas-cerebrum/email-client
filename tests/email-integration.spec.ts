@@ -2,7 +2,34 @@ import { describe, test, expect, beforeAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { ImapFlow } from 'imapflow';
 import { EmailClient, EmailFilterType, EmailMarkAction } from '../src';
+
+/** Opens a raw ImapFlow connection and returns the flags for emails matching the given subject. */
+async function getImapFlags(subject: string): Promise<Set<string>[]> {
+    const client = new ImapFlow({
+        host: 'imap.gmail.com',
+        port: 993,
+        secure: true,
+        auth: { user: process.env.RECEIVER_EMAIL!, pass: process.env.RECEIVER_PASSWORD! },
+        logger: false,
+    });
+
+    try {
+        await client.connect();
+        await client.mailboxOpen('INBOX');
+        const uids = await client.search({ subject }, { uid: true });
+        if (!uids || uids.length === 0) return [];
+
+        const results: Set<string>[] = [];
+        for await (const msg of client.fetch(uids, { flags: true }, { uid: true })) {
+            results.push(msg.flags);
+        }
+        return results;
+    } finally {
+        try { await client.logout(); } catch { /* ignore */ }
+    }
+}
 
 describe('EmailClient Integration Workflows', () => {
     let emailClient: EmailClient;
@@ -225,6 +252,51 @@ describe('EmailClient Integration Workflows', () => {
         await emailClient.clean({ filters: filterCriteria });
     });
 
+    test('should verify mark() actually modifies the correct email flags on the server', { timeout: 180000 }, async () => {
+        const uniqueSubject = `Mark Verify Flags ${Date.now()}`;
+        const recipient = process.env.RECEIVER_EMAIL!;
+
+        await emailClient.send({
+            to: recipient,
+            subject: uniqueSubject,
+            text: 'Verifying flags are applied to the correct email.',
+        });
+
+        await emailClient.receive({
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            waitTimeout: TIMEOUT,
+            pollInterval: POLLING,
+        });
+
+        const filterCriteria = [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }];
+
+        // Mark as READ and verify \\Seen flag is present
+        await emailClient.mark({ action: EmailMarkAction.READ, filters: filterCriteria });
+        let flags = await getImapFlags(uniqueSubject);
+        expect(flags).toHaveLength(1);
+        expect(flags[0].has('\\Seen')).toBe(true);
+
+        // Mark as UNREAD and verify \\Seen flag is removed
+        await emailClient.mark({ action: EmailMarkAction.UNREAD, filters: filterCriteria });
+        flags = await getImapFlags(uniqueSubject);
+        expect(flags).toHaveLength(1);
+        expect(flags[0].has('\\Seen')).toBe(false);
+
+        // Mark as FLAGGED and verify \\Flagged is present
+        await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria });
+        flags = await getImapFlags(uniqueSubject);
+        expect(flags).toHaveLength(1);
+        expect(flags[0].has('\\Flagged')).toBe(true);
+
+        // Mark as UNFLAGGED and verify \\Flagged is removed
+        await emailClient.mark({ action: EmailMarkAction.UNFLAGGED, filters: filterCriteria });
+        flags = await getImapFlags(uniqueSubject);
+        expect(flags).toHaveLength(1);
+        expect(flags[0].has('\\Flagged')).toBe(false);
+
+        await emailClient.clean({ filters: filterCriteria });
+    });
+
     test('should apply custom IMAP string flags using mark()', async () => {
         const uniqueSubject = `Mark Custom Flags Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -418,6 +490,33 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
+        test('should verify emails are permanently removed after clean()', async () => {
+            const uniqueSubject = `CleanVerify-${Date.now()}`;
+            const recipient = process.env.RECEIVER_EMAIL!;
+
+            await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'This email should be deleted.' });
+
+            await emailClient.receive({
+                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                waitTimeout: TIMEOUT,
+                pollInterval: POLLING,
+            });
+
+            const deletedCount = await emailClient.clean({
+                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            });
+            expect(deletedCount).toBe(1);
+
+            // Verify the email is actually gone by attempting to receive it again
+            await expect(
+                emailClient.receive({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    waitTimeout: 15000,
+                    pollInterval: POLLING,
+                })
+            ).rejects.toThrow(/within 15000ms/);
+        });
+
         test('should delete ALL emails in INBOX when called with no options', async () => {
             const batchId = `CleanAll-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
@@ -471,7 +570,7 @@ describe('EmailClient Integration Workflows', () => {
                 const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
-                const testArchiveFolder = '[Gmail]/Taslaklar';
+                const testArchiveFolder = '\\Flagged';
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
                 await emailClient.receive({
@@ -486,6 +585,24 @@ describe('EmailClient Integration Workflows', () => {
                 });
 
                 expect(count).toBe(1);
+
+                // Verify the email is no longer in INBOX
+                await expect(
+                    emailClient.receive({
+                        filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        waitTimeout: 15000,
+                        pollInterval: POLLING,
+                    })
+                ).rejects.toThrow(/within 15000ms/);
+
+                // Verify the email arrived in the archive folder
+                const archived = await emailClient.receive({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folder: testArchiveFolder,
+                    waitTimeout: TIMEOUT,
+                    pollInterval: POLLING,
+                });
+                expect(archived.subject).toContain(uniqueSubject);
 
                 await emailClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],

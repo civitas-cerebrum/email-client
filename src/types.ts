@@ -109,7 +109,7 @@ export interface EmailSendOptions {
 export interface EmailReceiveOptions {
     /** Array of filters to apply when searching for emails. All filters are combined (AND logic). */
     filters: EmailFilter[];
-    /** IMAP folder to search. Defaults to 'INBOX'. */
+    /** IMAP folder to search. Accepts a literal path or a specialUse role (e.g. '\\Sent', '\\Trash'). Defaults to 'INBOX'. */
     folder?: string;
     /** How long to poll for a matching email (ms). Defaults to 30000. */
     waitTimeout?: number;
@@ -160,8 +160,8 @@ export interface EmailMarkOptions {
     action: EmailMarkAction | string[];
     /** Filters to identify which emails should be marked. If omitted, applies to all emails in the folder. */
     filters?: EmailFilter[];
-    /** The target mailbox folder to perform the action in. Defaults to 'INBOX'. */
+    /** The target mailbox folder. Accepts a literal path or a specialUse role (e.g. '\\Trash', '\\Sent'). Defaults to 'INBOX'. */
     folder?: string;
-    /** The destination folder used when the `ARCHIVED` action is triggered. Defaults to 'Archive'. */
+    /** The destination folder for the `ARCHIVED` action. Accepts a literal path or a specialUse role (e.g. '\\Flagged', '\\All'). Defaults to 'Archive'. */
     archiveFolder?: string;
 }
