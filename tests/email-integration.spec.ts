@@ -121,15 +121,16 @@ describe('EmailClient Integration Workflows', () => {
     });
 
     test('should throw a timeout error if no email matches the criteria', async () => {
+        const shortTimeout = 15000;
         const impossibleSubject = `This email will never exist ${Date.now()}`;
 
         await expect(
             emailClient.receive({
                 filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
-                waitTimeout: TIMEOUT,
+                waitTimeout: shortTimeout,
                 pollInterval: POLLING,
             })
-        ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
+        ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
     });
 
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async () => {
@@ -304,9 +305,10 @@ describe('EmailClient Integration Workflows', () => {
         expect(latestEmail.text).toContain('newer');
         expect(latestEmail.text).not.toContain('older');
 
-        // Verify it has the most recent date among all matches
-        const allDates = allEmails.map(e => e.date.getTime());
-        expect(latestEmail.date.getTime()).toBe(Math.max(...allDates));
+        // Verify receive() picked the email with the later date
+        const olderEmail = allEmails.find(e => e.text.includes('older'));
+        expect(olderEmail).toBeDefined();
+        expect(latestEmail.date.getTime()).toBeGreaterThan(olderEmail!.date.getTime());
 
         await emailClient.clean({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
@@ -360,15 +362,16 @@ describe('EmailClient Integration Workflows', () => {
 
     describe('receiveAll()', () => {
         test('should throw a timeout error when no emails match within the deadline', async () => {
+            const shortTimeout = 15000;
             const impossibleSubject = `receiveAll-never-exists-${Date.now()}`;
 
             await expect(
                 emailClient.receiveAll({
                     filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
-                    waitTimeout: TIMEOUT,
+                    waitTimeout: shortTimeout,
                     pollInterval: POLLING,
                 })
-            ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
+            ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
         });
     });
 
