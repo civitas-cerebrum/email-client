@@ -418,6 +418,33 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
+        test('should verify emails are permanently removed after clean()', async () => {
+            const uniqueSubject = `CleanVerify-${Date.now()}`;
+            const recipient = process.env.RECEIVER_EMAIL!;
+
+            await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'This email should be deleted.' });
+
+            await emailClient.receive({
+                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                waitTimeout: TIMEOUT,
+                pollInterval: POLLING,
+            });
+
+            const deletedCount = await emailClient.clean({
+                filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            });
+            expect(deletedCount).toBe(1);
+
+            // Verify the email is actually gone by attempting to receive it again
+            await expect(
+                emailClient.receive({
+                    filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    waitTimeout: 15000,
+                    pollInterval: POLLING,
+                })
+            ).rejects.toThrow(/within 15000ms/);
+        });
+
         test('should delete ALL emails in INBOX when called with no options', async () => {
             const batchId = `CleanAll-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;

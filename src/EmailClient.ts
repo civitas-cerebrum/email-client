@@ -338,7 +338,7 @@ export class EmailClient {
                 ? this.buildSearchCriteria(filters)
                 : { all: true };
 
-            const uids = await client.search(searchCriteria);
+            const uids = await client.search(searchCriteria, { uid: true });
 
             if (!uids || uids.length === 0) {
                 log('No emails to %s in "%s"', actionName, folder);
@@ -448,7 +448,7 @@ export class EmailClient {
         maxFetchLimit: number = 50
     ): Promise<ReceivedEmail[]> {
         const searchCriteria = this.buildSearchCriteria(filters);
-        const uids = await client.search(searchCriteria);
+        const uids = await client.search(searchCriteria, { uid: true });
         if (!uids || uids.length === 0) return [];
 
         const newUids = uids.filter(uid => !seenUids.has(uid));
