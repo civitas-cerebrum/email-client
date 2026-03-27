@@ -135,11 +135,12 @@ describe('EmailClient Integration Workflows', () => {
 
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async () => {
         const batchId = `ClientFilterTest-${Date.now()}`;
+        const uniqueToken = `XTOKEN_${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await Promise.all([
-            emailClient.send({ to: recipient, subject: `${batchId} - Target`, text: 'Apple' }),
-            emailClient.send({ to: recipient, subject: `${batchId} - Ignore`, text: 'Banana' }),
+            emailClient.send({ to: recipient, subject: `${batchId} - Target`, text: `Match on ${uniqueToken}` }),
+            emailClient.send({ to: recipient, subject: `${batchId} - Ignore`, text: 'No match here' }),
         ]);
 
         const allEmails = await emailClient.receiveAll({
@@ -151,9 +152,9 @@ describe('EmailClient Integration Workflows', () => {
 
         expect(allEmails.length).toBeGreaterThanOrEqual(2);
 
-        // Now we can safely test the client-side filtering
+        // Now we can safely test the client-side filtering with the unique token
         const filtered = emailClient.applyFilters(allEmails, [
-            { type: EmailFilterType.CONTENT, value: 'Apple' }
+            { type: EmailFilterType.CONTENT, value: uniqueToken }
         ]);
 
         expect(filtered).toHaveLength(1);
