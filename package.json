@@ -1,6 +1,6 @@
 {
   "name": "@civitas-cerebrum/email-client",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A generic SMTP/IMAP email client for test automation. Send, receive, search, and clean emails with composable filters.",
   "type": "module",
   "main": "./dist/index.js",
