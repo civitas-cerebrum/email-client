@@ -48,6 +48,45 @@ export interface EmailCredentials {
 }
 
 /**
+ * SMTP credentials for sending emails.
+ */
+export interface SmtpCredentials {
+    /** SMTP sender email address. */
+    email: string;
+    /** SMTP sender password or app password. */
+    password: string;
+    /** SMTP host (e.g. 'smtp-relay.sendinblue.com'). */
+    host: string;
+    /** SMTP port. Defaults to 587. */
+    port?: number;
+}
+
+/**
+ * IMAP credentials for receiving/managing emails.
+ */
+export interface ImapCredentials {
+    /** IMAP email address. */
+    email: string;
+    /** IMAP password or app password. */
+    password: string;
+    /** IMAP host. Defaults to 'imap.gmail.com'. */
+    host?: string;
+    /** IMAP port. Defaults to 993. */
+    port?: number;
+}
+
+/**
+ * Flexible credential configuration.
+ * Provide smtp, imap, or both depending on which features you need.
+ */
+export interface EmailClientConfig {
+    /** SMTP credentials — required for send(). */
+    smtp?: SmtpCredentials;
+    /** IMAP credentials — required for receive(), receiveAll(), clean(), mark(). */
+    imap?: ImapCredentials;
+}
+
+/**
  * Options for sending an email.
  * Provide `text` for plain-text, `html` for inline HTML, or `htmlFile` for an HTML template file.
  */

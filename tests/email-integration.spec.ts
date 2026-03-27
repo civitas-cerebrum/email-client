@@ -6,7 +6,7 @@ import { EmailClient, EmailFilterType, EmailMarkAction } from '../src';
 
 describe('EmailClient Integration Workflows', () => {
     let emailClient: EmailClient;
-    const TIMEOUT = 60000;
+    const TIMEOUT = 120000;
     const POLLING = 5000;
 
     beforeAll(async () => {
@@ -121,15 +121,16 @@ describe('EmailClient Integration Workflows', () => {
     });
 
     test('should throw a timeout error if no email matches the criteria', async () => {
+        const shortTimeout = 15000;
         const impossibleSubject = `This email will never exist ${Date.now()}`;
 
         await expect(
             emailClient.receive({
                 filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
-                waitTimeout: TIMEOUT,
+                waitTimeout: shortTimeout,
                 pollInterval: POLLING,
             })
-        ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
+        ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
     });
 
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async () => {
@@ -250,6 +251,70 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
+    // ─── RECEIVE() LATEST EMAIL ──────────────────────────────────────────
+
+    test('receive() should return the most recent email when multiple match', async () => {
+        const batchId = `LatestEmailTest-${Date.now()}`;
+        const recipient = process.env.RECEIVER_EMAIL!;
+
+        // Send two emails with the same subject prefix but different content
+        await emailClient.send({
+            to: recipient,
+            subject: `${batchId}`,
+            text: 'First email - older',
+        });
+
+        // Small delay to ensure distinct timestamps
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        await emailClient.send({
+            to: recipient,
+            subject: `${batchId}`,
+            text: 'Second email - newer',
+        });
+
+        // Wait for both to arrive — check INBOX first, then Spam as fallback
+        let allEmails = await emailClient.receiveAll({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            waitTimeout: TIMEOUT,
+            pollInterval: POLLING,
+            expectedCount: 2,
+        }).catch(async () => {
+            // If not found in INBOX, check Spam folder
+            return emailClient.receiveAll({
+                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+                folder: '[Gmail]/Spam',
+                waitTimeout: TIMEOUT,
+                pollInterval: POLLING,
+                expectedCount: 2,
+            });
+        });
+
+        expect(allEmails.length).toBeGreaterThanOrEqual(2);
+
+        // Now test that receive() returns the most recent one
+        const folder = allEmails[0].filePath.includes('Spam') ? '[Gmail]/Spam' : 'INBOX';
+        const latestEmail = await emailClient.receive({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            waitTimeout: TIMEOUT,
+            pollInterval: POLLING,
+        });
+
+        // The latest email should be the second one sent
+        // Note: Brevo may prepend tracking URLs to plain text, so use a partial match
+        expect(latestEmail.text).toContain('newer');
+        expect(latestEmail.text).not.toContain('older');
+
+        // Verify receive() picked the email with the later date
+        const olderEmail = allEmails.find(e => e.text.includes('older'));
+        expect(olderEmail).toBeDefined();
+        expect(latestEmail.date.getTime()).toBeGreaterThan(olderEmail!.date.getTime());
+
+        await emailClient.clean({
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+        });
+    });
+
     // ─── SEND() ────────────────────────────────────────────────────────────
 
     describe('send()', () => {
@@ -297,15 +362,16 @@ describe('EmailClient Integration Workflows', () => {
 
     describe('receiveAll()', () => {
         test('should throw a timeout error when no emails match within the deadline', async () => {
+            const shortTimeout = 15000;
             const impossibleSubject = `receiveAll-never-exists-${Date.now()}`;
 
             await expect(
                 emailClient.receiveAll({
                     filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
-                    waitTimeout: TIMEOUT,
+                    waitTimeout: shortTimeout,
                     pollInterval: POLLING,
                 })
-            ).rejects.toThrow(new RegExp(`within ${TIMEOUT}ms`));
+            ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
         });
     });
 

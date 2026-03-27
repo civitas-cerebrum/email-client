@@ -6,3 +6,4 @@ test-coverage-report.txt
 .env
 /.claude
 *.md
+docs

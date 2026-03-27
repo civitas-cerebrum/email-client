@@ -13,7 +13,7 @@ npx tsc --noEmit     # Type check only
 ## Architecture
 
 - `src/EmailClient.ts` — Core class: send (SMTP), receive/receiveAll (IMAP), clean, applyFilters
-- `src/types.ts` — All public type definitions (EmailFilterType, EmailFilter, EmailCredentials, etc.)
+- `src/types.ts` — All public type definitions (EmailFilterType, EmailFilter, EmailCredentials, SmtpCredentials, ImapCredentials, EmailClientConfig, etc.)
 - `src/logger.ts` — debug-based logger (`DEBUG=email-client:*`)
 - `src/index.ts` — Public exports
 
@@ -33,3 +33,4 @@ npx tsc --noEmit     # Type check only
 - **`applyFilters` is public** — consumers can use it for client-side filtering of already-fetched emails
 - **Logger** uses `debug` with `email-client:*` namespace (not `TESTER_DEBUG`)
 - **Default SMTP port** is 587 (no env var needed)
+- **Split credentials** — SMTP and IMAP credentials are independent; constructor accepts { smtp?, imap? } or legacy flat EmailCredentials for backward compat
