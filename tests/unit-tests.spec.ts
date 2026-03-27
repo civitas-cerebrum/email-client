@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { EmailFilterType, EmailFilter, EmailCredentials, ReceivedEmail } from '../src/types';
+import { EmailFilterType, EmailFilter, EmailCredentials, EmailClientConfig, ReceivedEmail } from '../src/types';
 import { EmailClient } from '../src/EmailClient';
 import { EmailMarkAction } from '../src';
 
@@ -27,6 +27,7 @@ const mockMessageMove = vi.fn().mockResolvedValue(true);
 const mockMessageDelete = vi.fn().mockResolvedValue(true);
 const mockSearch = vi.fn().mockResolvedValue([1]);
 const mockMailboxOpen = vi.fn().mockResolvedValue(undefined);
+const mockFetch = vi.fn();
 
 vi.mock('imapflow', () => {
     return {
@@ -39,6 +40,7 @@ vi.mock('imapflow', () => {
             messageFlagsRemove: mockMessageFlagsRemove,
             messageMove: mockMessageMove,
             search: mockSearch,
+            fetch: mockFetch,
             getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
         })),
     };
@@ -643,6 +645,168 @@ describe('EmailClient Unit Tests', () => {
             await expect(
                 emailClient.receiveAll({ filters: [], waitTimeout: 100 })
             ).rejects.toThrow('At least one email filter is required');
+        });
+    });
+
+    // ─── RECEIVE() LATEST EMAIL ────────────────────────────────────
+
+    describe('receive() latest email ordering', () => {
+        function buildMimeSource(subject: string, date: Date, from: string = 'noreply@example.com'): string {
+            return [
+                `From: ${from}`,
+                `To: fake-receiver@test.com`,
+                `Subject: ${subject}`,
+                `Date: ${date.toUTCString()}`,
+                `Content-Type: text/plain; charset="utf-8"`,
+                ``,
+                `Body of ${subject}`,
+            ].join('\r\n');
+        }
+
+        function createAsyncIterable(messages: Array<{ uid: number; source: string }>) {
+            return {
+                async *[Symbol.asyncIterator]() {
+                    for (const msg of messages) {
+                        yield { uid: msg.uid, source: Buffer.from(msg.source) };
+                    }
+                },
+            };
+        }
+
+        test('receive() returns the most recent email by date when multiple match', async () => {
+            const olderDate = new Date('2025-01-10T00:00:00Z');
+            const newerDate = new Date('2025-06-15T00:00:00Z');
+            const oldestDate = new Date('2024-03-01T00:00:00Z');
+
+            // Search returns 3 UIDs
+            mockSearch.mockResolvedValue([1, 2, 3]);
+
+            // Fetch returns 3 emails in non-chronological order (newer, oldest, older)
+            mockFetch.mockReturnValue(createAsyncIterable([
+                { uid: 1, source: buildMimeSource('OTP Code', newerDate) },
+                { uid: 2, source: buildMimeSource('OTP Code', oldestDate) },
+                { uid: 3, source: buildMimeSource('OTP Code', olderDate) },
+            ]));
+
+            const result = await emailClient.receive({
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'OTP Code' }],
+                waitTimeout: 5000,
+                pollInterval: 100,
+            });
+
+            expect(result.subject).toBe('OTP Code');
+            expect(result.date.toISOString()).toBe(newerDate.toISOString());
+        });
+
+        test('receive() returns correct email when latest is not first in fetch order', async () => {
+            const oldDate = new Date('2024-01-01T00:00:00Z');
+            const latestDate = new Date('2026-02-20T00:00:00Z');
+
+            mockSearch.mockResolvedValue([10, 20]);
+
+            // Fetch returns older email first, newer email second
+            mockFetch.mockReturnValue(createAsyncIterable([
+                { uid: 10, source: buildMimeSource('Welcome', oldDate) },
+                { uid: 20, source: buildMimeSource('Welcome', latestDate) },
+            ]));
+
+            const result = await emailClient.receive({
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'Welcome' }],
+                waitTimeout: 5000,
+                pollInterval: 100,
+            });
+
+            expect(result.date.toISOString()).toBe(latestDate.toISOString());
+        });
+
+        test('receiveAll() returns all matches without date sorting', async () => {
+            const date1 = new Date('2025-06-15T00:00:00Z');
+            const date2 = new Date('2024-03-01T00:00:00Z');
+            const date3 = new Date('2025-01-10T00:00:00Z');
+
+            mockSearch.mockResolvedValue([1, 2, 3]);
+
+            mockFetch.mockReturnValue(createAsyncIterable([
+                { uid: 1, source: buildMimeSource('Alert', date1) },
+                { uid: 2, source: buildMimeSource('Alert', date2) },
+                { uid: 3, source: buildMimeSource('Alert', date3) },
+            ]));
+
+            const results = await emailClient.receiveAll({
+                filters: [{ type: EmailFilterType.SUBJECT, value: 'Alert' }],
+                waitTimeout: 5000,
+                pollInterval: 100,
+                expectedCount: 3,
+            });
+
+            expect(results).toHaveLength(3);
+            // receiveAll preserves fetch order, not sorted by date
+            expect(results[0].date.toISOString()).toBe(date1.toISOString());
+            expect(results[1].date.toISOString()).toBe(date2.toISOString());
+            expect(results[2].date.toISOString()).toBe(date3.toISOString());
+        });
+    });
+
+    // ─── CREDENTIAL FLEXIBILITY ─────────────────────────────────────
+
+    describe('Credential flexibility', () => {
+        test('constructs with smtp-only config', () => {
+            const config: EmailClientConfig = {
+                smtp: { email: 'sender@test.com', password: 'pass', host: 'smtp.test.com' },
+            };
+            expect(() => new EmailClient(config)).not.toThrow();
+        });
+
+        test('constructs with imap-only config', () => {
+            const config: EmailClientConfig = {
+                imap: { email: 'receiver@test.com', password: 'pass' },
+            };
+            expect(() => new EmailClient(config)).not.toThrow();
+        });
+
+        test('constructs with both smtp and imap config', () => {
+            const config: EmailClientConfig = {
+                smtp: { email: 'sender@test.com', password: 'pass', host: 'smtp.test.com' },
+                imap: { email: 'receiver@test.com', password: 'pass' },
+            };
+            expect(() => new EmailClient(config)).not.toThrow();
+        });
+
+        test('constructs with legacy flat EmailCredentials', () => {
+            expect(() => new EmailClient(dummyCredentials)).not.toThrow();
+        });
+
+        test('send() throws "SMTP credentials are required" when smtp is missing', async () => {
+            const client = new EmailClient({ imap: { email: 'r@test.com', password: 'p' } });
+            await expect(
+                client.send({ to: 'someone@test.com', subject: 'Hi', text: 'Hello' })
+            ).rejects.toThrow('SMTP credentials are required');
+        });
+
+        test('receive() throws "IMAP credentials are required" when imap is missing', async () => {
+            const client = new EmailClient({ smtp: { email: 's@test.com', password: 'p', host: 'smtp.test.com' } });
+            await expect(
+                client.receive({ filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }] })
+            ).rejects.toThrow('IMAP credentials are required');
+        });
+
+        test('receiveAll() throws "IMAP credentials are required" when imap is missing', async () => {
+            const client = new EmailClient({ smtp: { email: 's@test.com', password: 'p', host: 'smtp.test.com' } });
+            await expect(
+                client.receiveAll({ filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }] })
+            ).rejects.toThrow('IMAP credentials are required');
+        });
+
+        test('clean() throws "IMAP credentials are required" when imap is missing', async () => {
+            const client = new EmailClient({ smtp: { email: 's@test.com', password: 'p', host: 'smtp.test.com' } });
+            await expect(client.clean()).rejects.toThrow('IMAP credentials are required');
+        });
+
+        test('mark() throws "IMAP credentials are required" when imap is missing', async () => {
+            const client = new EmailClient({ smtp: { email: 's@test.com', password: 'p', host: 'smtp.test.com' } });
+            await expect(
+                client.mark({ action: EmailMarkAction.READ, filters: [{ type: EmailFilterType.SUBJECT, value: 'test' }] })
+            ).rejects.toThrow('IMAP credentials are required');
         });
     });
 });

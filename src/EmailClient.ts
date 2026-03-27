@@ -13,7 +13,10 @@ import {
     EmailFilterType,
     EmailFilter,
     EmailMarkOptions,
-    EmailMarkAction
+    EmailMarkAction,
+    EmailClientConfig,
+    SmtpCredentials,
+    ImapCredentials
 } from './types.js';
 
 const log = createLogger('imap');
@@ -25,12 +28,54 @@ const smtpLog = createLogger('smtp');
  */
 export class EmailClient {
     private smtpTransport: nodemailer.Transporter | null = null;
+    private smtpConfig?: SmtpCredentials;
+    private imapConfig?: ImapCredentials;
 
     /**
      * Initializes the EmailClient.
      * @param credentials Configuration for connecting to the SMTP and IMAP servers.
      */
-    constructor(private credentials: EmailCredentials) { }
+    constructor(credentials: EmailClientConfig | EmailCredentials) {
+        const resolved = this.normalizeCredentials(credentials);
+        this.smtpConfig = resolved.smtp;
+        this.imapConfig = resolved.imap;
+    }
+
+    private normalizeCredentials(input: EmailClientConfig | EmailCredentials): EmailClientConfig {
+        if ('senderEmail' in input || 'receiverEmail' in input) {
+            const legacy = input as EmailCredentials;
+            log('Legacy EmailCredentials detected — consider migrating to { smtp, imap } format');
+            return {
+                smtp: legacy.senderEmail ? {
+                    email: legacy.senderEmail,
+                    password: legacy.senderPassword,
+                    host: legacy.senderSmtpHost,
+                    port: legacy.senderSmtpPort,
+                } : undefined,
+                imap: legacy.receiverEmail ? {
+                    email: legacy.receiverEmail,
+                    password: legacy.receiverPassword,
+                    host: legacy.receiverImapHost,
+                    port: legacy.receiverImapPort,
+                } : undefined,
+            };
+        }
+        return input as EmailClientConfig;
+    }
+
+    private requireSmtp(): SmtpCredentials {
+        if (!this.smtpConfig) {
+            throw new Error('SMTP credentials are required to send emails. Provide { smtp: { email, password, host } } when constructing EmailClient.');
+        }
+        return this.smtpConfig;
+    }
+
+    private requireImap(): ImapCredentials {
+        if (!this.imapConfig) {
+            throw new Error('IMAP credentials are required to receive/manage emails. Provide { imap: { email, password } } when constructing EmailClient.');
+        }
+        return this.imapConfig;
+    }
 
     // ════════════════════════════════════════════════════════════════════════
     // 1. SMTP API
@@ -57,7 +102,7 @@ export class EmailClient {
         }
 
         const mailOptions: nodemailer.SendMailOptions = {
-            from: this.credentials.senderEmail,
+            from: this.requireSmtp().email,
             to,
             subject,
             ...(htmlContent ? { html: htmlContent } : { text: text ?? '' })
@@ -236,7 +281,12 @@ export class EmailClient {
                 accumulatedMatches.push(...newMatches);
 
                 if (accumulatedMatches.length >= expectedCount) {
-                    return returnAll ? accumulatedMatches : accumulatedMatches[accumulatedMatches.length - 1];
+                    if (returnAll) {
+                        return accumulatedMatches;
+                    }
+                    accumulatedMatches.sort((a, b) => b.date.getTime() - a.date.getTime());
+                    log('Returning the most recent email (date: %s) from %d match(es)', accumulatedMatches[0].date.toISOString(), accumulatedMatches.length);
+                    return accumulatedMatches[0];
                 }
 
                 if (returnAll) {
@@ -332,34 +382,31 @@ export class EmailClient {
 
     /** Instantiates an ImapFlow client using the provided credentials. */
     private createImapClient(): ImapFlow {
+        const imap = this.requireImap();
         return new ImapFlow({
-            host: this.credentials.receiverImapHost ?? 'imap.gmail.com',
-            port: this.credentials.receiverImapPort ?? 993,
+            host: imap.host ?? 'imap.gmail.com',
+            port: imap.port ?? 993,
             secure: true,
-            auth: {
-                user: this.credentials.receiverEmail,
-                pass: this.credentials.receiverPassword
-            },
-            logger: false
+            auth: { user: imap.email, pass: imap.password },
+            logger: false,
         });
     }
 
     /** Logs standard IMAP connection details. */
     private logImapConnection(): void {
-        log('IMAP connected to %s as %s', this.credentials.receiverImapHost ?? 'imap.gmail.com', this.credentials.receiverEmail);
+        const imap = this.requireImap();
+        log('IMAP connected to %s as %s', imap.host ?? 'imap.gmail.com', imap.email);
     }
 
     /** Retrieves or instantiates the cached NodeMailer SMTP transport. */
     private getSmtpTransport(): nodemailer.Transporter {
         if (!this.smtpTransport) {
+            const smtp = this.requireSmtp();
             this.smtpTransport = nodemailer.createTransport({
-                host: this.credentials.senderSmtpHost,
-                port: this.credentials.senderSmtpPort ?? 587,
-                secure: this.credentials.senderSmtpPort === 465,
-                auth: {
-                    user: this.credentials.senderEmail,
-                    pass: this.credentials.senderPassword
-                }
+                host: smtp.host,
+                port: smtp.port ?? 587,
+                secure: smtp.port === 465,
+                auth: { user: smtp.email, pass: smtp.password },
             });
         }
         return this.smtpTransport;

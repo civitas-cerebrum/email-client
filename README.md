@@ -24,39 +24,74 @@ npm install @civitas-cerebrum/email-client
 
 ## Quick Start
 
+### Send-Only (SMTP)
+
 ```ts
-import { EmailClient, EmailFilterType, EmailMarkAction } from '@civitas-cerebrum/email-client';
+import { EmailClient } from '@civitas-cerebrum/email-client';
 
 const client = new EmailClient({
-    senderEmail: 'sender@example.com',
-    senderPassword: 'app-password',
-    senderSmtpHost: 'smtp.example.com',
-    receiverEmail: 'receiver@example.com',
-    receiverPassword: 'app-password',
+    smtp: {
+        email: 'sender@example.com',
+        password: 'app-password',
+        host: 'smtp.example.com',
+    },
 });
 
-// 1. Send an email
 await client.send({
     to: 'user@example.com',
     subject: 'Your OTP Code',
     text: 'Your code is 123456',
 });
+```
 
-// 2. Poll the inbox until the email arrives
+### Receive-Only (IMAP)
+
+```ts
+import { EmailClient, EmailFilterType } from '@civitas-cerebrum/email-client';
+
+const client = new EmailClient({
+    imap: {
+        email: 'receiver@example.com',
+        password: 'app-password',
+    },
+});
+
 const email = await client.receive({
     filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }],
-    waitTimeout: 30000 // Waits up to 30 seconds
 });
-console.log(email.text); // "Your code is 123456"
+console.log(email.text);
+```
 
-// 3. Mark as Read, or clean up the test
+### Full Client (Send + Receive)
+
+```ts
+import { EmailClient, EmailFilterType, EmailMarkAction } from '@civitas-cerebrum/email-client';
+
+const client = new EmailClient({
+    smtp: {
+        email: 'sender@example.com',
+        password: 'app-password',
+        host: 'smtp.example.com',
+    },
+    imap: {
+        email: 'receiver@example.com',
+        password: 'app-password',
+    },
+});
+
+await client.send({ to: 'user@example.com', subject: 'OTP', text: '123456' });
+
+const email = await client.receive({
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'OTP' }],
+});
+
 await client.mark({
     action: EmailMarkAction.READ,
-    filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }]
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'OTP' }],
 });
 
 await client.clean({
-    filters: [{ type: EmailFilterType.SUBJECT, value: 'Your OTP Code' }]
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'OTP' }],
 });
 ```
 
@@ -66,20 +101,40 @@ await client.clean({
 
 ### Initialization
 
-```ts
-const client = new EmailClient(credentials: EmailCredentials);
-```
+**Constructor:** `new EmailClient({ smtp?, imap? })` or `new EmailClient(legacyCredentials)`
+
+**SmtpCredentials** (required for `send()`):
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `senderEmail` | `string` | — | SMTP sender email address |
-| `senderPassword` | `string` | — | SMTP sender password or app password |
-| `senderSmtpHost` | `string` | — | SMTP host (e.g., `'smtp.gmail.com'`) |
-| `senderSmtpPort` | `number` | `587` | SMTP port |
-| `receiverEmail` | `string` | — | IMAP receiver email address |
-| `receiverPassword` | `string` | — | IMAP receiver password or app password |
-| `receiverImapHost` | `string` | `'imap.gmail.com'` | IMAP host |
-| `receiverImapPort` | `number` | `993` | IMAP port |
+| `email` | `string` | — | SMTP sender email address |
+| `password` | `string` | — | SMTP sender password or app password |
+| `host` | `string` | — | SMTP host (e.g., `'smtp.gmail.com'`) |
+| `port` | `number` | `587` | SMTP port |
+
+**ImapCredentials** (required for `receive()`, `receiveAll()`, `clean()`, `mark()`):
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `email` | `string` | — | IMAP email address |
+| `password` | `string` | — | IMAP password or app password |
+| `host` | `string` | `'imap.gmail.com'` | IMAP host |
+| `port` | `number` | `993` | IMAP port |
+
+### Legacy Format
+
+The old flat `EmailCredentials` interface is still supported for backward compatibility. Migration to the new split format is encouraged.
+
+```ts
+// Legacy format (still supported)
+const client = new EmailClient({
+    senderEmail: 'sender@example.com',
+    senderPassword: 'app-password',
+    senderSmtpHost: 'smtp.example.com',
+    receiverEmail: 'receiver@example.com',
+    receiverPassword: 'app-password',
+});
+```
 
 -----
 
@@ -102,7 +157,7 @@ await client.send({ to: 'user@example.com', subject: 'Report', htmlFile: 'emails
 
 ### Receiving Emails (`receive` / `receiveAll`)
 
-The client uses a robust polling mechanism. It will continuously query the IMAP server until the `waitTimeout` is reached or the filters are satisfied. Combine multiple filters to create strict `AND` logic constraints.
+The client uses a robust polling mechanism. It will continuously query the IMAP server until the `waitTimeout` is reached or the filters are satisfied. Combine multiple filters to create strict `AND` logic constraints. When multiple emails match, `receive()` returns the most recent one by date.
 
 ```ts
 // Get the single most recent matching email
@@ -200,6 +255,18 @@ When you receive an email, the client parses the raw MIME source and returns a c
 | `html` | `string` | Parsed HTML body (empty string if plain-text only) |
 | `text` | `string` | Parsed plain-text content |
 | `filePath` | `string` | Local path to the downloaded `.html` copy |
+
+-----
+
+## Error Handling
+
+The client provides clear error messages when credentials are missing for a specific operation:
+
+| Operation | Missing Credentials | Error Message |
+|---|---|---|
+| `send()` | SMTP | `SMTP credentials are required to send emails. Provide { smtp: { email, password, host } } when constructing EmailClient.` |
+| `receive()` / `receiveAll()` | IMAP | `IMAP credentials are required to receive/manage emails. Provide { imap: { email, password } } when constructing EmailClient.` |
+| `clean()` / `mark()` | IMAP | `IMAP credentials are required to receive/manage emails. Provide { imap: { email, password } } when constructing EmailClient.` |
 
 -----
 
