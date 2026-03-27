@@ -64,6 +64,8 @@ console.log(email.text);
 
 ### Full Client (Send + Receive)
 
+SMTP and IMAP credentials are independent — they can point to different providers or accounts. For example, send via a transactional relay and receive from Gmail:
+
 ```ts
 import { EmailClient, EmailFilterType, EmailMarkAction } from '@civitas-cerebrum/email-client';
 
@@ -183,7 +185,9 @@ const allEmails = await client.receiveAll({
 | `folder` | `string` | `'INBOX'` | IMAP folder to search |
 | `waitTimeout` | `number` | `30000` | Max milliseconds to poll before throwing an error |
 | `pollInterval` | `number` | `3000` | Milliseconds to wait between IMAP fetch attempts |
+| `expectedCount` | `number` | `1` | Number of matching emails required before returning |
 | `downloadDir` | `string` | `os.tmpdir()` | Directory to save downloaded `.html` copies |
+| `maxFetchLimit` | `number` | `50` | Max emails to fetch per polling cycle (memory protection) |
 
 #### Available Filters (`EmailFilterType`)
 
