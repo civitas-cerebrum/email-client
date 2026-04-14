@@ -31,18 +31,20 @@ const mockFetch = vi.fn();
 
 vi.mock('imapflow', () => {
     return {
-        ImapFlow: vi.fn().mockImplementation(() => ({
-            connect: vi.fn().mockResolvedValue(undefined),
-            logout: vi.fn().mockResolvedValue(undefined),
-            mailboxOpen: mockMailboxOpen,
-            messageDelete: mockMessageDelete,
-            messageFlagsAdd: mockMessageFlagsAdd,
-            messageFlagsRemove: mockMessageFlagsRemove,
-            messageMove: mockMessageMove,
-            search: mockSearch,
-            fetch: mockFetch,
-            getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-        })),
+        ImapFlow: vi.fn().mockImplementation(function () {
+            return {
+                connect: vi.fn().mockResolvedValue(undefined),
+                logout: vi.fn().mockResolvedValue(undefined),
+                mailboxOpen: mockMailboxOpen,
+                messageDelete: mockMessageDelete,
+                messageFlagsAdd: mockMessageFlagsAdd,
+                messageFlagsRemove: mockMessageFlagsRemove,
+                messageMove: mockMessageMove,
+                search: mockSearch,
+                fetch: mockFetch,
+                getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+            };
+        }),
     };
 });
 // ─────────────────────────────────────────────────────────────────────
