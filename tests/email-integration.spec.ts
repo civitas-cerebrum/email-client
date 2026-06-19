@@ -92,7 +92,7 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test('should fetch multiple emails using receiveAll', async () => {
+    test('should fetch multiple emails using receiveAll', { timeout: 180000 }, async () => {
         const batchId = `BatchTest-${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
