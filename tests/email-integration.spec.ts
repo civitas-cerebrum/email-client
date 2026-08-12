@@ -563,10 +563,16 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
-        // One full receive() wait, then clean(), then a short wait that is
-        // expected to expire proving the email is gone. 120000 + 15000 alone
-        // already exceeded the old 120000 global budget.
-        test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1) }, async () => {
+        // One full receive() wait, then an UNBOUNDED clean() (delete + expunge,
+        // no waitTimeout of its own), then a short wait that is expected to
+        // expire proving the email is gone. The clean() needs its own `extra`
+        // allowance for the same reason the sibling whole-mailbox clean below
+        // and the mark() round-trip above have one: charging an unbounded
+        // server operation to OVERHEAD is what made this test fail at exactly
+        // its budget twice — 195020ms against a 195000ms budget on the second
+        // run. 120000 matches the whole-mailbox clean allowance, which is
+        // strictly more server work than this single-message delete.
+        test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1, 120000) }, async () => {
             const uniqueSubject = `CleanVerify-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
