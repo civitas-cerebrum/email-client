@@ -14,10 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     # The live SMTP/IMAP suite runs here. Without an explicit bound a genuine
     # hang inherits GitHub's 360-minute default and burns six hours of runner
-    # time before anyone sees a red build. The full suite (unit + 34 live
-    # integration tests) has been landing in ~16 minutes; 45 leaves room for a
-    # slow mail day while still failing fast on a real hang.
-    timeout-minutes: 45
+    # time before anyone sees a red build.
+    #
+    # Sizing: a passing test returns as soon as the mail lands, so the doubled
+    # per-test waits do not slow a good run — the last full run took ~16
+    # minutes. The cost only appears on slow or failing tests, each of which
+    # can now burn up to 240s instead of 120s. 90 minutes covers a normal run
+    # plus roughly ten fully-expired long waits. It is deliberately NOT sized
+    # to the pathological ceiling (every one of the 34 tests burning its whole
+    # budget is ~3.5 hours) — a run like that is a genuine hang and should be
+    # killed. A bound that kills a legitimately slow-but-passing run would
+    # just recreate the failure this PR fixes, wearing a hang's clothes.
+    timeout-minutes: 90
 
     steps:
       - name: 🗂️ Checkout repository

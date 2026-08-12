@@ -50,7 +50,8 @@ jobs:
   integration:
     name: 🧪 Live SMTP/IMAP suite
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Same suite as the publish job — same sizing rationale (see publish.yml).
+    timeout-minutes: 90
     # Same-repo PRs only (secrets are unavailable to fork PRs); schedule and
     # manual dispatch always run.
     if: >-

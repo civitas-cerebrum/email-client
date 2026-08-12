@@ -39,6 +39,16 @@ describe('EmailClient Integration Workflows', () => {
     // internal client waits it can spend, with margin for the non-waiting
     // work around them.
     //
+    // WHY THESE NUMBERS ARE LARGE — READ BEFORE TIGHTENING THEM.
+    // This suite runs against a free-tier hosted mail provider. The dominant
+    // cost is that provider's delivery latency, not this library's speed: an
+    // email can take minutes to become visible over IMAP on a slow day. The
+    // budgets are sized for the provider, not for the code. Tightening them
+    // back down does not make the suite faster on a good day (a passing test
+    // returns as soon as the mail lands) — it only makes the suite fail on a
+    // slow one, which is exactly the release-blocking failure these numbers
+    // were raised to stop.
+    //
     // `receive()` / `receiveAll()` poll until `Date.now() + waitTimeout` and
     // only then throw the diagnostic "Found 0/N emails within Nms" error, so
     // an unlucky-but-legitimate slow delivery consumes the ENTIRE wait budget
@@ -51,9 +61,17 @@ describe('EmailClient Integration Workflows', () => {
     // in vitest.config.ts is budget(1), so a test that forgets to declare one
     // still gets a full wait plus margin.
 
-    /** Standard wait for a real email to arrive and be matched. */
-    const TIMEOUT = 120000;
-    /** Negative-path wait — used where the wait is EXPECTED to expire. */
+    /**
+     * Standard wait for a real email to arrive and be matched. Sized for the
+     * free-tier provider's delivery latency, not for the library.
+     */
+    const TIMEOUT = 240000;
+    /**
+     * Negative-path wait — used ONLY where the wait is EXPECTED to expire
+     * (proving an email is absent). Deliberately not scaled with TIMEOUT:
+     * widening a wait that must run to exhaustion only adds dead time to
+     * every run.
+     */
     const SHORT_TIMEOUT = 15000;
     /** Poll interval for the mailbox polling loop. */
     const POLLING = 5000;
@@ -63,7 +81,7 @@ describe('EmailClient Integration Workflows', () => {
      * its deadline at the top of the loop and can therefore overrun by one
      * fetch cycle.
      */
-    const OVERHEAD = 60000;
+    const OVERHEAD = 120000;
 
     /**
      * Vitest budget for a test that can spend `longWaits` full waits and
@@ -577,7 +595,7 @@ describe('EmailClient Integration Workflows', () => {
 
         // One full receiveAll() wait plus an unbounded clean() over the whole
         // INBOX — the delete set is not fixed by the test, so it gets extra.
-        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 60000) }, async () => {
+        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 120000) }, async () => {
             const batchId = `CleanAll-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
