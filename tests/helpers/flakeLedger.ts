@@ -91,7 +91,15 @@ export class FlakeLedger {
         try {
             fs.appendFileSync(summaryPath, this.summaryMarkdown(runTag) + '\n', 'utf-8');
         } catch (err) {
-            console.warn('Could not write the flake summary: %o', err);
+            // One line, message only — deliberately NOT `%o`, which dumps the
+            // whole Error with its stack. This branch is reached on a routine
+            // non-event (no step-summary file, an unwritable path) and is
+            // exercised on purpose by the unit tests, so a stack here reads as
+            // a crash in the CI log for something that changed nothing. The
+            // step summary is a convenience; the console report and the
+            // ::warning:: annotations above have already been emitted.
+            const reason = err instanceof Error ? err.message : String(err);
+            console.warn(`Flake summary not written to ${summaryPath} (${reason}) — console report above is unaffected.`);
         }
     }
 }
