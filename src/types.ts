@@ -111,6 +111,18 @@ export interface EmailReceiveOptions {
     filters: EmailFilter[];
     /** IMAP folder to search. Accepts a literal path or a specialUse role (e.g. '\\Sent', '\\Trash'). Defaults to 'INBOX'. */
     folder?: string;
+    /**
+     * Multiple IMAP folders to search in one call, each accepting a literal path or a
+     * specialUse role. Every folder is searched on every polling cycle and the matches
+     * are pooled, so a message the receiving server filed somewhere other than the
+     * inbox (spam, for instance) is still found. Takes precedence over `folder`.
+     *
+     * A folder in this list that does not exist on the server is skipped with a log
+     * line rather than throwing, so a portable folder set (e.g. `['INBOX', '\\Junk']`)
+     * works against servers that lack one of them. If NONE of the listed folders can be
+     * opened, the call throws. A single-folder search still throws on a missing folder.
+     */
+    folders?: string[];
     /** How long to poll for a matching email (ms). Defaults to 30000. */
     waitTimeout?: number;
     /** Interval between poll attempts (ms). Defaults to 3000. */
@@ -142,6 +154,23 @@ export interface ReceivedEmail {
 }
 
 /**
+ * Options for deleting emails from the mailbox.
+ */
+export interface EmailCleanOptions {
+    /** Filters identifying which emails to delete. If omitted, EVERY email in the target folder(s) is deleted. */
+    filters?: EmailFilter[];
+    /** The target mailbox folder. Accepts a literal path or a specialUse role. Defaults to 'INBOX'. */
+    folder?: string;
+    /**
+     * Multiple target folders, each accepting a literal path or a specialUse role.
+     * The delete is applied to each folder in turn and the returned count is the total.
+     * Takes precedence over `folder`. Missing folders are skipped (see
+     * {@link EmailReceiveOptions.folders}).
+     */
+    folders?: string[];
+}
+
+/**
  * Predefined actions for modifying email flags or state.
  */
 export enum EmailMarkAction {
@@ -162,6 +191,13 @@ export interface EmailMarkOptions {
     filters?: EmailFilter[];
     /** The target mailbox folder. Accepts a literal path or a specialUse role (e.g. '\\Trash', '\\Sent'). Defaults to 'INBOX'. */
     folder?: string;
+    /**
+     * Multiple source folders to mark across, each accepting a literal path or a
+     * specialUse role. The action is applied in each folder in turn and the returned
+     * count is the total. Takes precedence over `folder`. Missing folders are skipped
+     * (see {@link EmailReceiveOptions.folders}).
+     */
+    folders?: string[];
     /** The destination folder for the `ARCHIVED` action. Accepts a literal path or a specialUse role (e.g. '\\Flagged', '\\All'). Defaults to 'Archive'. */
     archiveFolder?: string;
 }

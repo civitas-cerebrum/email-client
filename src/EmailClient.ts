@@ -15,6 +15,7 @@ import {
     EmailMarkOptions,
     EmailMarkAction,
     EmailClientConfig,
+    EmailCleanOptions,
     SmtpCredentials,
     ImapCredentials
 } from './types.js';
@@ -146,14 +147,14 @@ export class EmailClient {
 
     /**
      * Deletes emails from the mailbox based on the provided filters.
-     * If no filters are provided, it deletes ALL emails in the specified folder.
-     * @param options Filtering criteria and the target folder.
+     * If no filters are provided, it deletes ALL emails in the specified folder(s).
+     * @param options Filtering criteria and the target folder(s).
      * @returns The number of emails successfully deleted.
      */
-    async clean(options?: { filters?: EmailFilter[]; folder?: string }): Promise<number> {
-        const folder = options?.folder ?? 'INBOX';
+    async clean(options?: EmailCleanOptions): Promise<number> {
+        const folders = this.normalizeFolders(options?.folder, options?.folders);
 
-        return this._executeImapAction(folder, options?.filters, 'delete', async (client, uids) => {
+        return this._executeImapAction(folders, options?.filters, 'delete', async (client, uids, folder) => {
             await client.messageDelete(uids, { uid: true });
             log('Deleted %d email(s) from "%s"', uids.length, folder);
         });
@@ -165,14 +166,16 @@ export class EmailClient {
      * @returns The number of emails successfully modified.
      */
     async mark(options: EmailMarkOptions): Promise<number> {
-        const { action, filters, folder = 'INBOX', archiveFolder = 'Archive' } = options;
+        const { action, filters, folder, folders: folderList, archiveFolder = 'Archive' } = options;
 
         const isValidAction = Array.isArray(action) || Object.values(EmailMarkAction).includes(action as any);
         if (!isValidAction) {
             throw new Error(`Unsupported mark action: ${action}`);
         }
 
-        return this._executeImapAction(folder, filters, 'mark', async (client, uids) => {
+        const folders = this.normalizeFolders(folder, folderList);
+
+        return this._executeImapAction(folders, filters, 'mark', async (client, uids, folder) => {
             if (uids.length === 0) return;
 
             // Handle Custom Flags
@@ -264,27 +267,33 @@ export class EmailClient {
      * Manages IMAP connection, continuous retry logic, timeout enforcement, and cleanup.
      */
     private async _pollMailbox(options: EmailReceiveOptions, returnAll: boolean): Promise<ReceivedEmail | ReceivedEmail[]> {
-        const { filters, folder = 'INBOX', waitTimeout = 30000, pollInterval = 3000, downloadDir, expectedCount = 1, maxFetchLimit = 50 } = options;
+        const { filters, folder, folders: folderList, waitTimeout = 30000, pollInterval = 3000, downloadDir, expectedCount = 1, maxFetchLimit = 50 } = options;
         this.validateFilters(filters);
 
+        const requestedFolders = this.normalizeFolders(folder, folderList);
         const deadline = Date.now() + waitTimeout;
         const client = this.createImapClient();
-        const seenUids = new Set<number>();
+        // UIDs are scoped to a mailbox, not to the account, so the same UID can name
+        // a different message in each searched folder. Key the seen-set by folder.
+        const seenUids = new Set<string>();
         const accumulatedMatches: ReceivedEmail[] = []; // Track across polling cycles
 
         try {
             await client.connect();
             this.logImapConnection();
 
-            const resolvedFolder = await this._resolveFolder(client, folder);
+            const openableFolders = await this._openableFolders(client, requestedFolders);
+            const searchedIn = openableFolders.join(', ');
 
             while (Date.now() < deadline) {
-                await client.mailboxOpen(resolvedFolder);
+                for (const resolvedFolder of openableFolders) {
+                    await client.mailboxOpen(resolvedFolder);
 
-                const candidates = await this.fetchNewCandidates(client, filters, seenUids, downloadDir, maxFetchLimit);
-                const newMatches = this.applyFilters(candidates, filters);
+                    const candidates = await this.fetchNewCandidates(client, resolvedFolder, filters, seenUids, downloadDir, maxFetchLimit);
+                    const newMatches = this.applyFilters(candidates, filters);
 
-                accumulatedMatches.push(...newMatches);
+                    accumulatedMatches.push(...newMatches);
+                }
 
                 if (accumulatedMatches.length >= expectedCount) {
                     if (returnAll) {
@@ -304,7 +313,7 @@ export class EmailClient {
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
             }
 
-            throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${resolvedFolder}" for: ${this.formatFilterSummary(filters)}`);
+            throw new Error(`Found ${accumulatedMatches.length}/${expectedCount} emails within ${waitTimeout}ms. Searched in "${searchedIn}" for: ${this.formatFilterSummary(filters)}`);
         } finally {
             try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
         }
@@ -315,10 +324,10 @@ export class EmailClient {
      * Safely wraps IMAP connection, UID searching, custom action execution, and logout.
      */
     private async _executeImapAction(
-        folder: string,
+        folders: string[],
         filters: EmailFilter[] | undefined,
         actionName: string,
-        actionFn: (client: ImapFlow, uids: number[]) => Promise<void>
+        actionFn: (client: ImapFlow, uids: number[], folder: string) => Promise<void>
     ): Promise<number> {
         const client = this.createImapClient();
 
@@ -326,50 +335,107 @@ export class EmailClient {
             await client.connect();
             this.logImapConnection();
 
-            const resolvedFolder = await this._resolveFolder(client, folder);
+            const openableFolders = await this._openableFolders(client, folders);
+
+            let affected = 0;
+
+            for (const resolvedFolder of openableFolders) {
+                await client.mailboxOpen(resolvedFolder);
+
+                const searchCriteria = filters && filters.length > 0
+                    ? this.buildSearchCriteria(filters)
+                    : { all: true };
+
+                const uids = await client.search(searchCriteria, { uid: true });
+
+                if (!uids || uids.length === 0) {
+                    log('No emails to %s in "%s"', actionName, resolvedFolder);
+                    continue;
+                }
+
+                try {
+                    await actionFn(client, uids, resolvedFolder);
+                } catch (err: any) {
+                    if (err.message.includes('NONEXISTENT') || err.message.includes('Unknown Mailbox')) {
+                        const available = await this._listAvailableFolders(client);
+                        throw new Error(
+                            `Action "${actionName}" failed. A target folder (${resolvedFolder}) does not exist.\n` +
+                            `Available folders: [${available.join(', ')}]`
+                        );
+                    }
+                    throw err;
+                }
+
+                affected += uids.length;
+            }
+
+            return affected;
+        } finally {
+            try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
+        }
+    }
+
+    /**
+     * Resolves a requested folder list to the subset that actually exists on the server.
+     *
+     * A single requested folder is strict — a missing folder throws the diagnostic
+     * "Failed to open folder" error, which is what a caller naming one folder wants.
+     * A multi-folder request is tolerant: an absent folder is skipped with a log line
+     * so a portable set (e.g. `['INBOX', '\\Junk']`) works on servers that lack one of
+     * them. If nothing in the list can be opened, that is still an error.
+     */
+    private async _openableFolders(client: ImapFlow, folders: string[]): Promise<string[]> {
+        const strict = folders.length === 1;
+        const openable: string[] = [];
+
+        for (const folder of folders) {
+            let resolved: string;
+            try {
+                resolved = await this._resolveFolder(client, folder);
+            } catch (err) {
+                if (strict) throw err;
+                log('Skipping folder "%s" — it could not be resolved on this server: %o', folder, err);
+                continue;
+            }
 
             try {
-                await client.mailboxOpen(resolvedFolder);
+                await client.mailboxOpen(resolved);
+                openable.push(resolved);
             } catch (err: any) {
-                if (err.serverResponseCode === 'NONEXISTENT' || err.message.includes('Unknown Mailbox')) {
+                const missing = err.serverResponseCode === 'NONEXISTENT' || String(err.message).includes('Unknown Mailbox');
+                if (!missing) throw err;
+                if (strict) {
                     const available = await this._listAvailableFolders(client);
                     throw new Error(
-                        `Failed to open folder "${resolvedFolder}".\n` +
+                        `Failed to open folder "${resolved}".\n` +
                         `Available folders on this server: [${available.join(', ')}]\n` +
                         `Check your ARCHIVE_FOLDER or folder settings.`
                     );
                 }
-                throw err;
+                log('Skipping folder "%s" — it does not exist on this server', resolved);
             }
-
-            const searchCriteria = filters && filters.length > 0
-                ? this.buildSearchCriteria(filters)
-                : { all: true };
-
-            const uids = await client.search(searchCriteria, { uid: true });
-
-            if (!uids || uids.length === 0) {
-                log('No emails to %s in "%s"', actionName, folder);
-                return 0;
-            }
-
-            try {
-                await actionFn(client, uids);
-            } catch (err: any) {
-                if (err.message.includes('NONEXISTENT') || err.message.includes('Unknown Mailbox')) {
-                    const available = await this._listAvailableFolders(client);
-                    throw new Error(
-                        `Action "${actionName}" failed. A target folder (${folder}) does not exist.\n` +
-                        `Available folders: [${available.join(', ')}]`
-                    );
-                }
-                throw err;
-            }
-
-            return uids.length;
-        } finally {
-            try { await client.logout(); } catch (err) { log('IMAP logout failed (ignored): %o', err); }
         }
+
+        if (openable.length === 0) {
+            const available = await this._listAvailableFolders(client);
+            throw new Error(
+                `Failed to open folder "${folders.join(', ')}".\n` +
+                `Available folders on this server: [${available.join(', ')}]\n` +
+                `Check your ARCHIVE_FOLDER or folder settings.`
+            );
+        }
+
+        return openable;
+    }
+
+    /**
+     * Collapses the `folder` / `folders` option pair into the folder list to operate on.
+     * `folders` wins when both are supplied; the default remains a lone 'INBOX', so
+     * every existing single-folder caller keeps its exact behaviour.
+     */
+    private normalizeFolders(folder?: string, folders?: string[]): string[] {
+        if (folders && folders.length > 0) return [...folders];
+        return [folder ?? 'INBOX'];
     }
 
     /**
@@ -473,16 +539,19 @@ export class EmailClient {
     /** Fetches unread/unseen messages from IMAP that match the search criteria. */
     private async fetchNewCandidates(
         client: ImapFlow,
+        folder: string,
         filters: EmailFilter[],
-        seenUids: Set<number>,
+        seenUids: Set<string>,
         downloadDir?: string,
         maxFetchLimit: number = 50
     ): Promise<ReceivedEmail[]> {
+        const key = (uid: number): string => `${folder}:${uid}`;
+
         const searchCriteria = this.buildSearchCriteria(filters);
         const uids = await client.search(searchCriteria, { uid: true });
         if (!uids || uids.length === 0) return [];
 
-        const newUids = uids.filter(uid => !seenUids.has(uid));
+        const newUids = uids.filter(uid => !seenUids.has(key(uid)));
         if (newUids.length === 0) return [];
 
         // Safety measure: Prevent memory spikes by capping the raw MIME fetch.
@@ -491,12 +560,12 @@ export class EmailClient {
         if (newUids.length > maxFetchLimit) {
             log('Warning: Found %d matching emails. Capping fetch limit to the %d most recent to conserve memory.', newUids.length, maxFetchLimit);
             // Add the omitted UIDs to 'seen' so we don't fetch them in the next polling cycle
-            newUids.slice(0, -maxFetchLimit).forEach(uid => seenUids.add(uid));
+            newUids.slice(0, -maxFetchLimit).forEach(uid => seenUids.add(key(uid)));
         }
 
         const candidates: ReceivedEmail[] = [];
         for await (const msg of client.fetch(limitedUids, { source: true }, { uid: true })) {
-            seenUids.add(msg.uid);
+            seenUids.add(key(msg.uid));
             candidates.push(await this.parseMessage(msg, downloadDir));
         }
         return candidates;
