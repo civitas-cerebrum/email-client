@@ -76,26 +76,50 @@ describe('EmailClient Integration Workflows', () => {
     /** Poll interval for the mailbox polling loop. */
     const POLLING = 5000;
     /**
+     * Allowance for ONE unbounded server-side mutation on the critical path.
+     *
+     * This is the term whose absence broke the earlier attempts at this fix.
+     * `clean()`, `mark()` and the ARCHIVED move take NO waitTimeout — they
+     * run until the server finishes the delete/expunge/flag/move, and on a
+     * free-tier provider that is not fast. A budget that counts only the
+     * polling waits charges those mutations to the margin, and the test dies
+     * right at the edge: the observed failure was a full 120000 wait plus an
+     * unbounded clean() plus a 15000 expiry, landing at 195020ms against a
+     * 195000ms budget.
+     */
+    const MUTATION = 120000;
+
+    /**
      * Margin over the waits themselves: SMTP send, IMAP connect/logout per
-     * call, mark/clean round-trips, and the fact that `_pollMailbox` checks
-     * its deadline at the top of the loop and can therefore overrun by one
-     * fetch cycle.
+     * call, the fact that `_pollMailbox` checks its deadline at the top of
+     * the loop and can therefore overrun by one fetch cycle, and ONE trailing
+     * best-effort `clean()` for tests that tidy up after their assertions.
      */
     const OVERHEAD = 120000;
 
     /**
-     * Vitest budget for a test that can spend `longWaits` full waits and
-     * `shortWaits` expiring short waits, plus `extra` ms of measured tail
-     * work that OVERHEAD does not cover.
+     * Vitest budget for a test that can spend `longWaits` full waits,
+     * `shortWaits` expiring short waits, and `mutations` unbounded
+     * server-side mutations beyond the single trailing cleanup already
+     * covered by OVERHEAD.
+     *
+     * Counting rules:
+     *  - a `rejects`-style absence check ALWAYS burns its whole short wait by
+     *    construction (it must expire to prove absence) — count it at 100%,
+     *    never optimistically;
+     *  - a mutation the test then ASSERTS on is on the critical path and gets
+     *    its own MUTATION allowance; a trailing cleanup that runs after the
+     *    last assertion is the one OVERHEAD already covers.
      */
-    const budget = (longWaits: number, shortWaits = 0, extra = 0): number =>
-        longWaits * TIMEOUT + shortWaits * SHORT_TIMEOUT + OVERHEAD + extra;
+    const budget = (longWaits: number, shortWaits = 0, mutations = 0): number =>
+        longWaits * TIMEOUT + shortWaits * SHORT_TIMEOUT + mutations * MUTATION + OVERHEAD;
 
     beforeAll(async () => {
         emailClient = await import('../src/fixtures').then(m => m.setupGlobalEmailClient());
     });
 
-    // One full receive() wait.
+    // One full receive() wait. The trailing clean() needs no allowance: it
+    // runs after the last assertion and is the single cleanup OVERHEAD covers.
     test('should send, receive, and clean a plain text email (Exact Match)', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Test OTP Code ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -123,7 +147,7 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    // One full receive() wait.
+    // One full receive() wait; trailing clean() covered by OVERHEAD.
     test('should successfully send and verify an HTML formatted email', { timeout: budget(1) }, async () => {
         const uniqueSubject = `HTML Content Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -149,7 +173,8 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    // One full receiveAll() wait (3 parallel sends + clean sit inside OVERHEAD).
+    // One full receiveAll() wait; the 3 parallel sends and the trailing
+    // clean() sit inside OVERHEAD.
     test('should fetch multiple emails using receiveAll', { timeout: budget(1) }, async () => {
         const batchId = `BatchTest-${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -179,7 +204,7 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    // One full receive() wait.
+    // One full receive() wait; trailing clean() covered by OVERHEAD.
     test('should match emails using the CONTENT filter', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Content Filter Test ${Date.now()}`;
         const uniqueSecret = `SECRET_KEY_${Date.now()}`;
@@ -220,7 +245,7 @@ describe('EmailClient Integration Workflows', () => {
         ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
     });
 
-    // One full receiveAll() wait.
+    // One full receiveAll() wait; trailing clean() covered by OVERHEAD.
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', { timeout: budget(1) }, async () => {
         const batchId = `ClientFilterTest-${Date.now()}`;
         const uniqueToken = `XTOKEN_${Date.now()}`;
@@ -275,8 +300,9 @@ describe('EmailClient Integration Workflows', () => {
         expect(extractedText).toContain('Fallback text content');
     });
 
-    // One full receive() wait + 3 mark() round-trips + clean().
-    test('should successfully apply standard IMAP flags (READ, UNREAD, FLAGGED) using mark()', { timeout: budget(1) }, async () => {
+    // One full receive() wait, then 3 asserted mark() mutations (unbounded,
+    // no waitTimeout) before the trailing clean().
+    test('should successfully apply standard IMAP flags (READ, UNREAD, FLAGGED) using mark()', { timeout: budget(1, 0, 1) }, async () => {
         const uniqueSubject = `Mark Standard Flags Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -314,12 +340,13 @@ describe('EmailClient Integration Workflows', () => {
         await emailClient.clean({ filters: filterCriteria });
     });
 
-    // One full receive() wait, then a long serial tail: 4 mark() round-trips
-    // interleaved with 4 getImapFlags() calls that each open, search, fetch
-    // and log out of their own IMAP connection, plus clean(). This tail is
-    // what exhausted the previous 180000 budget in CI, so it gets a full
-    // extra wait's worth of headroom rather than OVERHEAD alone.
-    test('should verify mark() actually modifies the correct email flags on the server', { timeout: budget(1, 0, TIMEOUT) }, async () => {
+    // One full receive() wait, then a long serial tail of UNBOUNDED server
+    // mutations: 4 asserted mark() calls, each interleaved with a
+    // getImapFlags() call that opens, searches, fetches and logs out of its
+    // own IMAP connection, plus clean(). This tail — not the wait — is what
+    // exhausted the original 180000 budget in the release run, so it is
+    // charged as two mutation allowances instead of being left to the margin.
+    test('should verify mark() actually modifies the correct email flags on the server', { timeout: budget(1, 0, 2) }, async () => {
         const uniqueSubject = `Mark Verify Flags ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -364,7 +391,8 @@ describe('EmailClient Integration Workflows', () => {
         await emailClient.clean({ filters: filterCriteria });
     });
 
-    // One full receive() wait.
+    // One full receive() wait plus ONE asserted mark(); that single mutation
+    // plus the trailing clean() is what OVERHEAD is sized for.
     test('should apply custom IMAP string flags using mark()', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Mark Custom Flags Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -462,7 +490,7 @@ describe('EmailClient Integration Workflows', () => {
     // ─── SEND() ────────────────────────────────────────────────────────────
 
     describe('send()', () => {
-        // One full receive() wait.
+        // One full receive() wait; trailing clean() covered by OVERHEAD.
         test('should load and send HTML content from a local file (htmlFile option)', { timeout: budget(1) }, async () => {
             const uniqueSubject = `HtmlFile Send Test ${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
@@ -563,16 +591,14 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
-        // One full receive() wait, then an UNBOUNDED clean() (delete + expunge,
-        // no waitTimeout of its own), then a short wait that is expected to
-        // expire proving the email is gone. The clean() needs its own `extra`
-        // allowance for the same reason the sibling whole-mailbox clean below
-        // and the mark() round-trip above have one: charging an unbounded
-        // server operation to OVERHEAD is what made this test fail at exactly
-        // its budget twice — 195020ms against a 195000ms budget on the second
-        // run. 120000 matches the whole-mailbox clean allowance, which is
-        // strictly more server work than this single-message delete.
-        test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1, 120000) }, async () => {
+        // The test that exposed the missing mutation term. It spends THREE
+        // things, not two: a full receive() wait, an UNBOUNDED clean()
+        // (delete + expunge, no waitTimeout) whose result it asserts on, and
+        // a short wait that is GUARANTEED to burn in full because it must
+        // expire to prove the email is gone. Charging that clean() to the
+        // margin is what made this test die at exactly its budget — 195020ms
+        // against 195000ms.
+        test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1, 1) }, async () => {
             const uniqueSubject = `CleanVerify-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -599,9 +625,9 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(new RegExp(`within ${SHORT_TIMEOUT}ms`));
         });
 
-        // One full receiveAll() wait plus an unbounded clean() over the whole
-        // INBOX — the delete set is not fixed by the test, so it gets extra.
-        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 120000) }, async () => {
+        // One full receiveAll() wait plus an asserted, unbounded clean() over
+        // the WHOLE INBOX — the delete set is not fixed by the test.
+        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 1) }, async () => {
             const batchId = `CleanAll-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -626,8 +652,8 @@ describe('EmailClient Integration Workflows', () => {
         // ─── MARK() ────────────────────────────────────────────────────────────
 
         describe('mark() — UNFLAGGED, ARCHIVED, and error cases', () => {
-            // One full receive() wait + 2 mark() round-trips + clean().
-            test('should mark an email as UNFLAGGED', { timeout: budget(1) }, async () => {
+            // One full receive() wait + 2 asserted mark() mutations + clean().
+            test('should mark an email as UNFLAGGED', { timeout: budget(1, 0, 1) }, async () => {
                 const uniqueSubject = `Mark UNFLAGGED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -652,8 +678,10 @@ describe('EmailClient Integration Workflows', () => {
             });
 
             // Two full waits (receive from INBOX, then receive from the
-            // archive folder) plus one short wait that is expected to expire.
-            test('should archive an email by moving it to the archive folder', { timeout: budget(2, 1) }, async () => {
+            // archive folder), one short wait that is guaranteed to expire,
+            // and an asserted ARCHIVED mark() — a server-side MOVE with no
+            // waitTimeout, so it gets its own mutation allowance.
+            test('should archive an email by moving it to the archive folder', { timeout: budget(2, 1, 1) }, async () => {
                 const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -697,7 +725,8 @@ describe('EmailClient Integration Workflows', () => {
                 });
             });
 
-            // One full receive() wait.
+            // One full receive() wait. The mark() here rejects on validation
+            // before touching the server, so it is not a mutation.
             test('should throw for an unsupported mark action string', { timeout: budget(1) }, async () => {
                 const uniqueSubject = `Mark Bad Action Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
