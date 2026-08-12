@@ -183,11 +183,45 @@ const allEmails = await client.receiveAll({
 |---|---|---|---|
 | `filters` | `EmailFilter[]` | — | **Required.** Array of filters (AND logic) |
 | `folder` | `string` | `'INBOX'` | IMAP folder to search. Accepts a literal path or a `specialUse` role (e.g. `'\\Sent'`, `'\\Trash'`) |
+| `folders` | `string[]` | — | Several folders to search at once. Takes precedence over `folder`. See [Searching multiple folders](#searching-multiple-folders) |
 | `waitTimeout` | `number` | `30000` | Max milliseconds to poll before throwing an error |
 | `pollInterval` | `number` | `3000` | Milliseconds to wait between IMAP fetch attempts |
 | `expectedCount` | `number` | `1` | Number of matching emails required before returning |
 | `downloadDir` | `string` | `os.tmpdir()` | Directory to save downloaded `.html` copies |
 | `maxFetchLimit` | `number` | `50` | Max emails to fetch per polling cycle (memory protection) |
+
+#### Searching multiple folders
+
+A message does not always arrive where you expect it. Mail from a new or
+low-reputation sending domain is routinely filed as spam by the receiving
+server, and a spam-filed message is never found by an inbox-only search — no
+matter how long you wait for it.
+
+Pass `folders` to search several mailboxes in one call. Every folder is searched
+on every polling cycle and the matches are pooled, so the wait ends as soon as
+the message shows up anywhere in the set:
+
+```ts
+const email = await client.receive({
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'Your verification code' }],
+    folders: ['INBOX', '[Gmail]/Spam'],   // or ['INBOX', '\\Junk'] to stay portable
+    waitTimeout: 60000,
+});
+```
+
+`folders` is accepted by `receive`, `receiveAll`, `clean` and `mark`, and takes
+precedence over `folder` when both are given. For `clean` and `mark` the action
+is applied in each folder in turn and the returned count is the total.
+
+**Missing folders.** A single folder is strict — naming one that does not exist
+throws, listing the folders the server does have. A folder *list* is tolerant:
+an absent folder is skipped so a portable set works against servers that lack
+one of them. If none of the listed folders can be opened, the call still throws.
+
+> **Do not reach for `\All` as a shortcut.** All Mail also contains sent,
+> archived and recently-deleted copies, so a search across it will keep finding
+> a message you have already moved or deleted. Name the folders you actually
+> mean.
 
 #### Available Filters (`EmailFilterType`)
 
@@ -240,9 +274,23 @@ await client.clean({
     filters: [{ type: EmailFilterType.FROM, value: 'noreply@example.com' }],
 });
 
-// Nuke the entire inbox (Use with caution!)
-await client.clean();
+// Delete across several folders in one call
+await client.clean({
+    filters: [{ type: EmailFilterType.SUBJECT, value: 'my-test-run-42' }],
+    folders: ['INBOX', '[Gmail]/Spam'],
+});
+
+// Nuke an entire folder (Use with caution!)
+await client.clean();                       // every message in INBOX
+await client.clean({ folder: 'scratch' });  // every message in "scratch"
 ```
+
+> **Sharing a mailbox?** `clean()` with no filters deletes everything in the
+> target folder, including messages another process put there. If more than one
+> test run can touch the same mailbox, stamp a unique per-run token into every
+> subject you send and always pass a filter selecting it — then a cleanup can
+> only ever remove its own mail. Reserve the unfiltered form for a folder your
+> run created and owns.
 
 #### Folder Resolution
 

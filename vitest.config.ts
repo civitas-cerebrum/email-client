@@ -45,5 +45,14 @@ export default defineConfig({
     // does no network I/O today, so this does not need to scale with the
     // provider-driven test budgets.
     hookTimeout: 60000,
+
+    // NO GLOBAL `retry`. Retrying is only sound when every attempt is
+    // self-contained, and that has to be established per suite rather than
+    // assumed for all of them. The live mail suite establishes it (each
+    // attempt sends a message under a fresh, run-scoped subject and asserts
+    // only on that message) and declares its own `retry` on its top-level
+    // describe. A global retry here would silently paper over deterministic
+    // failures in the unit suites, where a second attempt cannot tell you
+    // anything the first one did not.
   },
 });

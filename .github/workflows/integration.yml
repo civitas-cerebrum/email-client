@@ -39,9 +39,29 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
-# The suite sends real mail to one shared mailbox and one of its tests calls
-# clean() with no filters, which deletes everything in the INBOX. Two runs
-# overlapping would delete each other's fixtures, so runs are serialised.
+# SERIALISATION — DEFENCE IN DEPTH, NOT THE ONLY DEFENCE
+# ------------------------------------------------------
+# The suite sends real mail to one shared mailbox, so two runs of it against
+# that mailbox must not overlap.
+#
+# The primary defence is now in the suite itself: every message it sends is
+# stamped with a per-run tag, every search and delete is scoped to that tag,
+# and the one test that deletes without a filter operates on a folder it
+# created and owns (see tests/email-integration.spec.ts). This group is the
+# second line — it protects against whatever the suite grows next, and against
+# mailbox-wide effects (quota, throttling) that no amount of per-message
+# scoping can isolate.
+#
+# THE GROUP KEY IS A CONSTANT, DELIBERATELY. Do not interpolate github.ref,
+# github.head_ref, github.workflow or anything else run-varying into it: a key
+# that varies per ref puts every branch in its own group, which is the same as
+# having no group at all. `publish.yml` declares this identical constant so a
+# release's live suite serialises against this one.
+#
+# Verified working: run 31577074789 (pull_request) was created at 08:09:28 and
+# its job did not start until 08:32:48 — three seconds after run 31576927510's
+# job completed at 08:32:45. The two runs' *run-level* windows overlapped only
+# because the second was queued by this group for 23 minutes.
 concurrency:
   group: live-mail-integration
   cancel-in-progress: false

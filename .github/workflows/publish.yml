@@ -9,6 +9,45 @@ permissions:
   id-token: write
   contents: read
 
+# THIS JOB RUNS THE LIVE MAIL SUITE, SO IT JOINS THE LIVE MAIL GROUP
+# ------------------------------------------------------------------
+# `npm run test:all` below includes the 34 live SMTP/IMAP tests, against the
+# same shared mailbox `integration.yml` uses. Until now this workflow declared
+# no concurrency at all, so a release could run that suite alongside a
+# `📬 Live Mail Integration` run — and did. On 2026-08-12 this job (run
+# 31577198070, 08:11:16–08:35:08) overlapped integration run 31576927510
+# (08:07:35–08:32:45) on the same mailbox, and failed with
+# "expected [] to have a length of 1 but got +0": its message was received and
+# then deleted out from under it, mid-test, by the other run's unfiltered
+# clean. The suite's own serialisation was working correctly — this workflow
+# simply was not part of it.
+#
+# THE TRADE-OFF, STATED PLAINLY. GitHub keeps at most ONE pending run per
+# concurrency group: if a publish is queued behind a live run and a newer live
+# run is then queued, the pending publish is cancelled. That risk is real, and
+# it is the reason this workflow was previously left out of the group.
+#
+# It is the right trade anyway:
+#   * the failure it prevents has already happened, and cost a release;
+#   * the failure it introduces is recoverable in one click — a cancelled
+#     publish has published nothing, the tag is untouched, and re-running the
+#     workflow from the Actions UI republishes the same version;
+#   * `cancel-in-progress: false` guarantees a publish that has STARTED is
+#     never interrupted, so no release can be cut off mid-publish;
+#   * the exposure window is small: live runs are triggered by same-repo PRs
+#     touching the client, plus one nightly cron at 03:00 UTC.
+#
+# The per-run isolation in tests/email-integration.spec.ts also lowers the
+# stake on both sides — an overlap is no longer catastrophic, and this group is
+# now belt to that braces rather than the only thing standing between a release
+# and someone else's clean().
+#
+# Keep this group key identical to the one in integration.yml. Two different
+# constants serialise nothing.
+concurrency:
+  group: live-mail-integration
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
