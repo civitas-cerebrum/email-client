@@ -1,29 +1,121 @@
-import { describe, test, expect, beforeAll } from 'vitest';
+import { describe, test, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { ImapFlow } from 'imapflow';
 import { EmailClient, EmailFilterType, EmailMarkAction } from '../src';
+import { RunScope } from './helpers/runScope';
+import { FlakeLedger } from './helpers/flakeLedger';
 
-/** Opens a raw ImapFlow connection and returns the flags for emails matching the given subject. */
-async function getImapFlags(subject: string): Promise<Set<string>[]> {
-    const client = new ImapFlow({
+// ── Per-run isolation ────────────────────────────────────────────────────
+// This suite sends real mail to ONE shared mailbox, and more than one run can
+// be in flight against that mailbox at a time — a tagged release publish and a
+// pull-request check, for instance. Anything this suite does that is scoped to
+// "the mailbox" rather than to "this run" is therefore reaching into another
+// run's fixtures.
+//
+// That is not a theoretical risk. A release run failed on
+// `should verify mark() actually modifies the correct email flags on the
+// server` with `expected [] to have a length of 1 but got +0` after 583717ms
+// of a 660000ms budget. It did not time out — the wait model worked. The
+// message had been received seconds earlier and then DISAPPEARED, because a
+// concurrent run had reached the no-filter clean test and emptied the inbox
+// out from under it.
+//
+// Every message this run sends is stamped with `run.tag`, every search and
+// every delete this suite performs is scoped by it, and the one test that
+// legitimately deletes without a filter now owns the folder it empties.
+const run = new RunScope();
+
+/**
+ * Folders the suite searches for its own mail.
+ *
+ * WHY MORE THAN THE INBOX. Sending goes through a free-tier provider to a
+ * hosted receiver, and such mail is intermittently filed as spam. A message
+ * sitting in the spam folder is never found by an inbox-only search at ANY
+ * timeout — an earlier run failed with "Found 0/1 emails within 240000ms" for
+ * exactly that reason, and no amount of extra waiting could have saved it.
+ *
+ * These tests exist to verify THIS LIBRARY's IMAP receive path — that a search
+ * finds a message, that flags are applied to the right one, that a clean really
+ * removes it. They are not a test of the receiving provider's spam classifier,
+ * so a message being filed as spam should not fail them.
+ *
+ * BE HONEST ABOUT THE COST: this deliberately hides genuine deliverability
+ * regressions. If the sending domain's reputation collapses and every message
+ * starts going to spam, this suite stays green. That signal is real and worth
+ * having — it just does not belong here, because a library test cannot tell a
+ * provider reputation problem from a library bug. It belongs in a dedicated
+ * deliverability check that asserts placement (mail must arrive in INBOX
+ * specifically) and is allowed to fail without blocking a library release.
+ *
+ * `[Gmail]/All Mail` was considered and rejected: it also contains sent,
+ * archived and recently-deleted copies, so it would break the suite's negative
+ * assertions — the clean-verify and archive tests prove a message is ABSENT
+ * from where it used to be, and All Mail keeps showing it. INBOX + Spam widens
+ * the search exactly as far as the spam problem requires and no further.
+ *
+ * Overridable so the suite is portable to a non-Gmail receiver.
+ */
+const SEARCH_FOLDERS: string[] = (process.env.MAIL_SEARCH_FOLDERS ?? 'INBOX,[Gmail]/Spam')
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+
+/**
+ * Retries for the live suite only.
+ *
+ * Safe here because every attempt is self-contained: each test builds its
+ * subject from `run.subject(...)` INSIDE the test body, so a second attempt
+ * sends a message with a subject the first attempt never used and asserts only
+ * against that message. No test reads state a previous attempt left behind, and
+ * no test's assertion can be satisfied by a previous attempt's mail.
+ *
+ * A failed attempt may not reach its own trailing `clean()`, so retries do add
+ * orphans to the mailbox. That is what the run-scoped cleanup in `afterAll`
+ * below is for — it deletes this run's messages including every abandoned
+ * attempt's, and cannot touch anyone else's.
+ */
+const LIVE_RETRIES = Number(process.env.LIVE_MAIL_RETRIES ?? 1);
+
+/** Opens a raw ImapFlow connection with the receiver's credentials. */
+function rawImapClient(): ImapFlow {
+    return new ImapFlow({
         host: 'imap.gmail.com',
         port: 993,
         secure: true,
         auth: { user: process.env.RECEIVER_EMAIL!, pass: process.env.RECEIVER_PASSWORD! },
         logger: false,
     });
+}
+
+/**
+ * Returns the flags for emails matching the given subject.
+ *
+ * Searches the same folder set as the client does — a message the receiver
+ * filed as spam still has flags, and asserting on it from the inbox alone would
+ * report "no such message" for a message that is plainly there.
+ */
+async function getImapFlags(subject: string): Promise<Set<string>[]> {
+    const client = rawImapClient();
 
     try {
         await client.connect();
-        await client.mailboxOpen('INBOX');
-        const uids = await client.search({ subject }, { uid: true });
-        if (!uids || uids.length === 0) return [];
 
         const results: Set<string>[] = [];
-        for await (const msg of client.fetch(uids, { flags: true }, { uid: true })) {
-            results.push(msg.flags);
+        for (const folder of SEARCH_FOLDERS) {
+            try {
+                await client.mailboxOpen(folder);
+            } catch {
+                continue; // folder absent on this server — the other folders still count
+            }
+
+            const uids = await client.search({ subject }, { uid: true });
+            if (!uids || uids.length === 0) continue;
+
+            for await (const msg of client.fetch(uids, { flags: true }, { uid: true })) {
+                results.push(msg.flags);
+            }
         }
         return results;
     } finally {
@@ -31,7 +123,98 @@ async function getImapFlags(subject: string): Promise<Set<string>[]> {
     }
 }
 
-describe('EmailClient Integration Workflows', () => {
+/**
+ * Creates a folder and APPENDs messages straight into it over IMAP.
+ *
+ * Used by the no-filter clean test so it can own its fixtures outright: no SMTP
+ * send, no delivery latency, no dependence on where the receiving provider
+ * decides to file the message — and, crucially, nothing in the folder that this
+ * run did not put there.
+ */
+async function seedFolder(folder: string, subjects: string[]): Promise<void> {
+    const client = rawImapClient();
+
+    try {
+        await client.connect();
+
+        // Tolerate a folder left over from an earlier attempt: create it if it
+        // is missing, then empty it, so a retry seeds a known-clean folder and
+        // the exact-count assertion below stays meaningful.
+        try {
+            await client.mailboxCreate(folder);
+        } catch { /* already exists */ }
+
+        await client.mailboxOpen(folder);
+        const stale = await client.search({ all: true }, { uid: true });
+        if (stale && stale.length > 0) {
+            await client.messageDelete(stale, { uid: true });
+        }
+
+        for (const subject of subjects) {
+            const source = [
+                `From: ${process.env.RECEIVER_EMAIL}`,
+                `To: ${process.env.RECEIVER_EMAIL}`,
+                `Subject: ${subject}`,
+                'Content-Type: text/plain; charset="utf-8"',
+                '',
+                'Seed message for the unfiltered-clean test.',
+                '',
+            ].join('\r\n');
+
+            await client.append(folder, source);
+        }
+    } finally {
+        try { await client.logout(); } catch { /* ignore */ }
+    }
+}
+
+/** Counts the messages currently in a folder. Returns -1 if the folder is gone. */
+async function countMessages(folder: string): Promise<number> {
+    const client = rawImapClient();
+
+    try {
+        await client.connect();
+        await client.mailboxOpen(folder);
+        const uids = await client.search({ all: true }, { uid: true });
+        return uids ? uids.length : 0;
+    } catch {
+        return -1;
+    } finally {
+        try { await client.logout(); } catch { /* ignore */ }
+    }
+}
+
+/** Removes a run-owned folder. Best effort — never fails a test. */
+async function dropFolder(folder: string): Promise<void> {
+    const client = rawImapClient();
+
+    try {
+        await client.connect();
+        await client.mailboxDelete(folder);
+    } catch { /* folder may never have been created */ } finally {
+        try { await client.logout(); } catch { /* ignore */ }
+    }
+}
+
+// ── Flake visibility ─────────────────────────────────────────────────────
+// A test that only passes on its second attempt must not look identical to one
+// that passed first time. Without this, adding retries converts a visible
+// failure into an invisible one and the suite degrades silently until it fails
+// outright. Vitest already annotates the retried line in its own output; this
+// additionally raises a workflow warning and writes a job-summary table, so the
+// flake is visible from the run's front page rather than only to whoever reads
+// the full log.
+const flaky = new FlakeLedger();
+
+afterEach((ctx) => {
+    flaky.record(ctx.task.name, ctx.task.result?.retryCount, ctx.task.result?.state);
+});
+
+afterAll(() => {
+    flaky.publish(run.tag);
+});
+
+describe('EmailClient Integration Workflows', { retry: LIVE_RETRIES }, () => {
     let emailClient: EmailClient;
 
     // ── Timeout model ────────────────────────────────────────────────────
@@ -60,6 +243,10 @@ describe('EmailClient Integration Workflows', () => {
     // the waits it can actually spend on its worst path. The global default
     // in vitest.config.ts is budget(1), so a test that forgets to declare one
     // still gets a full wait plus margin.
+    //
+    // NOTE ON RETRIES: `retry` gives each ATTEMPT the full declared budget —
+    // it does not divide it — so no budget below needs adjusting for retries.
+    // The job-level `timeout-minutes` is what bounds total retried time.
 
     /**
      * Standard wait for a real email to arrive and be matched. Sized for the
@@ -69,10 +256,10 @@ describe('EmailClient Integration Workflows', () => {
      * 240000ms later ("Found 0/1 emails within 240000ms"). Note what that
      * error means: the budget model is working — the wait ran to exhaustion
      * and produced its diagnostic instead of being killed by vitest — so a
-     * failure at this line is a DELIVERY problem, not a budget one. Before
-     * raising this number again, check whether the message arrived at all
-     * (a free-tier sender's mail landing in the receiver's spam folder is
-     * never found by an INBOX-only search, at any timeout).
+     * failure at this line is a DELIVERY problem, not a budget one. The most
+     * common cause of that shape, a free-tier sender's mail being filed as
+     * spam by the receiver, is now covered by SEARCH_FOLDERS rather than by
+     * waiting longer; raising this number would not have found that message.
      */
     const TIMEOUT = 300000;
     /**
@@ -125,12 +312,37 @@ describe('EmailClient Integration Workflows', () => {
 
     beforeAll(async () => {
         emailClient = await import('../src/fixtures').then(m => m.setupGlobalEmailClient());
+        console.log(`📬 Live mail run tag: ${run.tag} — searching [${SEARCH_FOLDERS.join(', ')}]`);
+    });
+
+    // ── Mailbox hygiene ──────────────────────────────────────────────────
+    // Deletes THIS RUN's mail and nothing else. Scoping by the run tag is the
+    // whole point: a global cleanup here would be the very bug this change
+    // exists to fix, because it would delete a concurrent run's in-flight
+    // messages exactly the way the no-filter clean test used to.
+    //
+    // This matters beyond tidiness. Every message left behind is another
+    // message the server has to walk on every future SUBJECT search, so an
+    // accumulating mailbox slowly inflates the delivery waits that the whole
+    // budget model is sized around. It also picks up the orphans a failed
+    // attempt left behind before its own trailing clean() could run.
+    afterAll(async () => {
+        if (!emailClient) return;
+        try {
+            const removed = await emailClient.clean({
+                filters: run.runFilters(),
+                folders: SEARCH_FOLDERS,
+            });
+            console.log(`🧹 Removed ${removed} message(s) belonging to run ${run.tag}`);
+        } catch (err) {
+            console.warn(`🧹 Run-scoped cleanup for ${run.tag} failed (ignored): %o`, err);
+        }
     });
 
     // One full receive() wait. The trailing clean() needs no allowance: it
     // runs after the last assertion and is the single cleanup OVERHEAD covers.
     test('should send, receive, and clean a plain text email (Exact Match)', { timeout: budget(1) }, async () => {
-        const uniqueSubject = `Test OTP Code ${Date.now()}`;
+        const uniqueSubject = run.subject('Test OTP Code');
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await emailClient.send({
@@ -144,6 +356,7 @@ describe('EmailClient Integration Workflows', () => {
                 { type: EmailFilterType.SUBJECT, value: uniqueSubject },
                 { type: EmailFilterType.TO, value: recipient }
             ],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
         });
@@ -152,13 +365,14 @@ describe('EmailClient Integration Workflows', () => {
         expect(email.text).toContain('847291');
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
     // One full receive() wait; trailing clean() covered by OVERHEAD.
     test('should successfully send and verify an HTML formatted email', { timeout: budget(1) }, async () => {
-        const uniqueSubject = `HTML Content Test ${Date.now()}`;
+        const uniqueSubject = run.subject('HTML Content Test');
         const recipient = process.env.RECEIVER_EMAIL!;
         const expectedHtml = '<h1 style="color: blue;">Welcome to Civitas!</h1><p>Your journey begins here.</p>';
 
@@ -170,6 +384,7 @@ describe('EmailClient Integration Workflows', () => {
 
         const email = await emailClient.receive({
             filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
         });
 
@@ -178,14 +393,15 @@ describe('EmailClient Integration Workflows', () => {
         expect(email.text).toMatch(/Welcome to Civitas!/i);
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
     // One full receiveAll() wait; the 3 parallel sends and the trailing
     // clean() sit inside OVERHEAD.
     test('should fetch multiple emails using receiveAll', { timeout: budget(1) }, async () => {
-        const batchId = `BatchTest-${Date.now()}`;
+        const batchId = run.subject('BatchTest');
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await Promise.all([
@@ -196,6 +412,7 @@ describe('EmailClient Integration Workflows', () => {
 
         const emails = await emailClient.receiveAll({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
             expectedCount: 3,
@@ -209,14 +426,15 @@ describe('EmailClient Integration Workflows', () => {
         }
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
     // One full receive() wait; trailing clean() covered by OVERHEAD.
     test('should match emails using the CONTENT filter', { timeout: budget(1) }, async () => {
-        const uniqueSubject = `Content Filter Test ${Date.now()}`;
-        const uniqueSecret = `SECRET_KEY_${Date.now()}`;
+        const uniqueSubject = run.subject('Content Filter Test');
+        const uniqueSecret = `SECRET_KEY_${run.tag}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await emailClient.send({
@@ -230,24 +448,27 @@ describe('EmailClient Integration Workflows', () => {
                 { type: EmailFilterType.SUBJECT, value: uniqueSubject },
                 { type: EmailFilterType.CONTENT, value: uniqueSecret }
             ],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
         });
 
         expect(email.text).toContain(uniqueSecret);
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
     // One short wait that is expected to expire.
     test('should throw a timeout error if no email matches the criteria', { timeout: budget(0, 1) }, async () => {
         const shortTimeout = SHORT_TIMEOUT;
-        const impossibleSubject = `This email will never exist ${Date.now()}`;
+        const impossibleSubject = run.subject('This email will never exist');
 
         await expect(
             emailClient.receive({
                 filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
+                folders: SEARCH_FOLDERS,
                 waitTimeout: shortTimeout,
                 pollInterval: POLLING,
             })
@@ -256,8 +477,8 @@ describe('EmailClient Integration Workflows', () => {
 
     // One full receiveAll() wait; trailing clean() covered by OVERHEAD.
     test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', { timeout: budget(1) }, async () => {
-        const batchId = `ClientFilterTest-${Date.now()}`;
-        const uniqueToken = `XTOKEN_${Date.now()}`;
+        const batchId = run.subject('ClientFilterTest');
+        const uniqueToken = `XTOKEN_${run.tag}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await Promise.all([
@@ -267,6 +488,7 @@ describe('EmailClient Integration Workflows', () => {
 
         const allEmails = await emailClient.receiveAll({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
             expectedCount: 2,
@@ -283,7 +505,8 @@ describe('EmailClient Integration Workflows', () => {
         expect(filtered[0].subject).toContain('Target');
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
@@ -312,7 +535,7 @@ describe('EmailClient Integration Workflows', () => {
     // One full receive() wait, then 3 asserted mark() mutations (unbounded,
     // no waitTimeout) before the trailing clean().
     test('should successfully apply standard IMAP flags (READ, UNREAD, FLAGGED) using mark()', { timeout: budget(1, 0, 1) }, async () => {
-        const uniqueSubject = `Mark Standard Flags Test ${Date.now()}`;
+        const uniqueSubject = run.subject('Mark Standard Flags Test');
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await emailClient.send({
@@ -323,6 +546,7 @@ describe('EmailClient Integration Workflows', () => {
 
         await emailClient.receive({
             filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
         });
 
@@ -330,23 +554,26 @@ describe('EmailClient Integration Workflows', () => {
 
         const readCount = await emailClient.mark({
             action: EmailMarkAction.READ,
-            filters: filterCriteria
+            filters: filterCriteria,
+            folders: SEARCH_FOLDERS,
         });
         expect(readCount).toBe(1);
 
         const unreadCount = await emailClient.mark({
             action: EmailMarkAction.UNREAD,
-            filters: filterCriteria
+            filters: filterCriteria,
+            folders: SEARCH_FOLDERS,
         });
         expect(unreadCount).toBe(1);
 
         const flaggedCount = await emailClient.mark({
             action: EmailMarkAction.FLAGGED,
-            filters: filterCriteria
+            filters: filterCriteria,
+            folders: SEARCH_FOLDERS,
         });
         expect(flaggedCount).toBe(1);
 
-        await emailClient.clean({ filters: filterCriteria });
+        await emailClient.clean({ filters: filterCriteria, folders: SEARCH_FOLDERS });
     });
 
     // One full receive() wait, then a long serial tail of UNBOUNDED server
@@ -355,8 +582,13 @@ describe('EmailClient Integration Workflows', () => {
     // own IMAP connection, plus clean(). This tail — not the wait — is what
     // exhausted the original 180000 budget in the release run, so it is
     // charged as two mutation allowances instead of being left to the margin.
+    //
+    // This is also the test that a concurrent run's unfiltered clean used to
+    // destroy: it asserts `flags` has length 1, and got 0 because the message
+    // had been deleted by another run between the receive() and the mark().
+    // The subject is now run-scoped and no other run's clean can select it.
     test('should verify mark() actually modifies the correct email flags on the server', { timeout: budget(1, 0, 2) }, async () => {
-        const uniqueSubject = `Mark Verify Flags ${Date.now()}`;
+        const uniqueSubject = run.subject('Mark Verify Flags');
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await emailClient.send({
@@ -367,43 +599,45 @@ describe('EmailClient Integration Workflows', () => {
 
         await emailClient.receive({
             filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
         });
 
         const filterCriteria = [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }];
+        const markOptions = { filters: filterCriteria, folders: SEARCH_FOLDERS };
 
         // Mark as READ and verify \\Seen flag is present
-        await emailClient.mark({ action: EmailMarkAction.READ, filters: filterCriteria });
+        await emailClient.mark({ action: EmailMarkAction.READ, ...markOptions });
         let flags = await getImapFlags(uniqueSubject);
         expect(flags).toHaveLength(1);
         expect(flags[0].has('\\Seen')).toBe(true);
 
         // Mark as UNREAD and verify \\Seen flag is removed
-        await emailClient.mark({ action: EmailMarkAction.UNREAD, filters: filterCriteria });
+        await emailClient.mark({ action: EmailMarkAction.UNREAD, ...markOptions });
         flags = await getImapFlags(uniqueSubject);
         expect(flags).toHaveLength(1);
         expect(flags[0].has('\\Seen')).toBe(false);
 
         // Mark as FLAGGED and verify \\Flagged is present
-        await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria });
+        await emailClient.mark({ action: EmailMarkAction.FLAGGED, ...markOptions });
         flags = await getImapFlags(uniqueSubject);
         expect(flags).toHaveLength(1);
         expect(flags[0].has('\\Flagged')).toBe(true);
 
         // Mark as UNFLAGGED and verify \\Flagged is removed
-        await emailClient.mark({ action: EmailMarkAction.UNFLAGGED, filters: filterCriteria });
+        await emailClient.mark({ action: EmailMarkAction.UNFLAGGED, ...markOptions });
         flags = await getImapFlags(uniqueSubject);
         expect(flags).toHaveLength(1);
         expect(flags[0].has('\\Flagged')).toBe(false);
 
-        await emailClient.clean({ filters: filterCriteria });
+        await emailClient.clean({ filters: filterCriteria, folders: SEARCH_FOLDERS });
     });
 
     // One full receive() wait plus ONE asserted mark(); that single mutation
     // plus the trailing clean() is what OVERHEAD is sized for.
     test('should apply custom IMAP string flags using mark()', { timeout: budget(1) }, async () => {
-        const uniqueSubject = `Mark Custom Flags Test ${Date.now()}`;
+        const uniqueSubject = run.subject('Mark Custom Flags Test');
         const recipient = process.env.RECEIVER_EMAIL!;
 
         await emailClient.send({
@@ -414,31 +648,36 @@ describe('EmailClient Integration Workflows', () => {
 
         await emailClient.receive({
             filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
         });
 
         const customFlagCount = await emailClient.mark({
             action: ['\\Draft', '\\Answered'],
-            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
         });
 
         expect(customFlagCount).toBe(1);
 
         await emailClient.clean({
-            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }]
+            filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
     // ─── RECEIVE() LATEST EMAIL ──────────────────────────────────────────
 
-    // Worst path is three full waits: receiveAll(INBOX) can expire, the
-    // .catch fallback then spends a second full receiveAll wait on Spam, and
-    // receive() spends a third.
-    test('receive() should return the most recent email when multiple match', { timeout: budget(3) }, async () => {
-        const batchId = `LatestEmailTest-${Date.now()}`;
+    // Worst path is two full waits: one receiveAll() and one receive().
+    // It used to be three, because a receiveAll() that expired on the INBOX
+    // was retried against the spam folder in a `.catch` — a hand-rolled,
+    // single-test version of the folder set every call now searches. With
+    // SEARCH_FOLDERS the fallback is gone and so is the wait it could spend.
+    test('receive() should return the most recent email when multiple match', { timeout: budget(2) }, async () => {
+        const batchId = run.subject('LatestEmailTest');
         const recipient = process.env.RECEIVER_EMAIL!;
 
-        // Send two emails with the same subject prefix but different content
+        // Send two emails with the same subject but different content
         await emailClient.send({
             to: recipient,
             subject: `${batchId}`,
@@ -454,35 +693,27 @@ describe('EmailClient Integration Workflows', () => {
             text: 'Second email - newer',
         });
 
-        // Wait for both to arrive — check INBOX first, then Spam as fallback
-        let allEmails = await emailClient.receiveAll({
+        const allEmails = await emailClient.receiveAll({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
             expectedCount: 2,
-        }).catch(async () => {
-            // If not found in INBOX, check Spam folder
-            return emailClient.receiveAll({
-                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                folder: '[Gmail]/Spam',
-                waitTimeout: TIMEOUT,
-                pollInterval: POLLING,
-                expectedCount: 2,
-            });
         });
 
         expect(allEmails.length).toBeGreaterThanOrEqual(2);
 
         // Now test that receive() returns the most recent one
-        const folder = allEmails[0].filePath.includes('Spam') ? '[Gmail]/Spam' : 'INBOX';
         const latestEmail = await emailClient.receive({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
             waitTimeout: TIMEOUT,
             pollInterval: POLLING,
         });
 
-        // The latest email should be the second one sent
-        // Note: Brevo may prepend tracking URLs to plain text, so use a partial match
+        // The latest email should be the second one sent.
+        // Note: the sending provider may prepend tracking URLs to plain text,
+        // so use a partial match.
         expect(latestEmail.text).toContain('newer');
         expect(latestEmail.text).not.toContain('older');
 
@@ -493,6 +724,7 @@ describe('EmailClient Integration Workflows', () => {
 
         await emailClient.clean({
             filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
+            folders: SEARCH_FOLDERS,
         });
     });
 
@@ -501,10 +733,10 @@ describe('EmailClient Integration Workflows', () => {
     describe('send()', () => {
         // One full receive() wait; trailing clean() covered by OVERHEAD.
         test('should load and send HTML content from a local file (htmlFile option)', { timeout: budget(1) }, async () => {
-            const uniqueSubject = `HtmlFile Send Test ${Date.now()}`;
+            const uniqueSubject = run.subject('HtmlFile Send Test');
             const recipient = process.env.RECEIVER_EMAIL!;
 
-            const tmpFile = path.join(os.tmpdir(), `test-email-${Date.now()}.html`);
+            const tmpFile = path.join(os.tmpdir(), `test-email-${run.tag}.html`);
             fs.writeFileSync(tmpFile, '<h2>From file</h2><p>Loaded from disk.</p>', 'utf-8');
 
             try {
@@ -516,6 +748,7 @@ describe('EmailClient Integration Workflows', () => {
 
                 const email = await emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                     waitTimeout: TIMEOUT,
                 });
 
@@ -525,6 +758,7 @@ describe('EmailClient Integration Workflows', () => {
                 fs.unlinkSync(tmpFile);
                 await emailClient.clean({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                 });
             }
         });
@@ -546,11 +780,12 @@ describe('EmailClient Integration Workflows', () => {
         // One short wait that is expected to expire.
         test('should throw a timeout error when no emails match within the deadline', { timeout: budget(0, 1) }, async () => {
             const shortTimeout = SHORT_TIMEOUT;
-            const impossibleSubject = `receiveAll-never-exists-${Date.now()}`;
+            const impossibleSubject = run.subject('receiveAll-never-exists');
 
             await expect(
                 emailClient.receiveAll({
                     filters: [{ type: EmailFilterType.SUBJECT, value: impossibleSubject }],
+                    folders: SEARCH_FOLDERS,
                     waitTimeout: shortTimeout,
                     pollInterval: POLLING,
                 })
@@ -585,16 +820,19 @@ describe('EmailClient Integration Workflows', () => {
     describe('clean()', () => {
         test('should return 0 when no emails match the filter criteria', async () => {
             const deletedCount = await emailClient.clean({
-                filters: [{ type: EmailFilterType.SUBJECT, value: `no-such-email-${Date.now()}` }],
+                filters: [{ type: EmailFilterType.SUBJECT, value: run.subject('no-such-email') }],
+                folders: SEARCH_FOLDERS,
             });
 
             expect(deletedCount).toBe(0);
         });
 
+        // Single named folder — the strict path, which must still report the
+        // missing folder rather than silently searching nothing.
         test('should throw when the specified folder does not exist on the server', async () => {
             await expect(
                 emailClient.clean({
-                    filters: [{ type: EmailFilterType.SUBJECT, value: `folder-test-${Date.now()}` }],
+                    filters: [{ type: EmailFilterType.SUBJECT, value: run.subject('folder-test') }],
                     folder: 'Trash',
                 })
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
@@ -608,19 +846,21 @@ describe('EmailClient Integration Workflows', () => {
         // margin is what made this test die at exactly its budget — 195020ms
         // against 195000ms.
         test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1, 1) }, async () => {
-            const uniqueSubject = `CleanVerify-${Date.now()}`;
+            const uniqueSubject = run.subject('CleanVerify');
             const recipient = process.env.RECEIVER_EMAIL!;
 
             await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'This email should be deleted.' });
 
             await emailClient.receive({
                 filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                folders: SEARCH_FOLDERS,
                 waitTimeout: TIMEOUT,
                 pollInterval: POLLING,
             });
 
             const deletedCount = await emailClient.clean({
                 filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                folders: SEARCH_FOLDERS,
             });
             expect(deletedCount).toBe(1);
 
@@ -628,34 +868,57 @@ describe('EmailClient Integration Workflows', () => {
             await expect(
                 emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                     waitTimeout: SHORT_TIMEOUT,
                     pollInterval: POLLING,
                 })
             ).rejects.toThrow(new RegExp(`within ${SHORT_TIMEOUT}ms`));
         });
 
-        // One full receiveAll() wait plus an asserted, unbounded clean() over
-        // the WHOLE INBOX — the delete set is not fixed by the test.
-        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 1) }, async () => {
-            const batchId = `CleanAll-${Date.now()}`;
-            const recipient = process.env.RECEIVER_EMAIL!;
+        // ── The unfiltered-clean path, on a folder this run owns ─────────
+        //
+        // This test used to call `clean()` with no options at all, which
+        // deletes EVERY message in the shared INBOX — including the in-flight
+        // fixtures of any other run against the same mailbox. That is exactly
+        // what broke the release run described at the top of this file: a
+        // concurrent run's message was received and then vanished before its
+        // flags could be asserted.
+        //
+        // The assertion is NOT weakened — it is strengthened. It still proves
+        // that a clean with no filters empties its target: the folder is
+        // seeded with a known number of messages, the returned delete count
+        // must equal that number exactly (the old test could only manage
+        // `>= 2`, because it had no idea what else was in the inbox), and the
+        // folder must then be verifiably empty.
+        //
+        // The folder is seeded over IMAP APPEND rather than by sending mail.
+        // Nothing about the unfiltered-clean path depends on how the messages
+        // got there, and appending removes both the delivery latency and the
+        // possibility that the receiving provider files a fixture somewhere
+        // the test is not looking.
+        //
+        // Two unbounded mutations on the critical path: the seed and the
+        // clean. No delivery wait is spent at all.
+        test('should delete ALL emails in a folder when called with no filters', { timeout: budget(0, 0, 2) }, async () => {
+            const folder = run.folder('cleanall');
+            const seeded = [
+                `${run.subject('CleanAll')} - A`,
+                `${run.subject('CleanAll')} - B`,
+                `${run.subject('CleanAll')} - C`,
+            ];
 
-            await Promise.all([
-                emailClient.send({ to: recipient, subject: `${batchId} - A`, text: 'a' }),
-                emailClient.send({ to: recipient, subject: `${batchId} - B`, text: 'b' }),
-            ]);
+            try {
+                await seedFolder(folder, seeded);
+                expect(await countMessages(folder)).toBe(seeded.length);
 
-            await emailClient.receiveAll({
-                filters: [{ type: EmailFilterType.SUBJECT, value: batchId }],
-                waitTimeout: TIMEOUT,
-                pollInterval: POLLING,
-                expectedCount: 2,
-            });
+                // No filters: every message in the folder must go.
+                const deletedCount = await emailClient.clean({ folder });
 
-            const deletedCount = await emailClient.clean();
-
-            // Since it cleans ALL emails, it will delete at least the 2 we just confirmed arrived.
-            expect(deletedCount).toBeGreaterThanOrEqual(2);
+                expect(deletedCount).toBe(seeded.length);
+                expect(await countMessages(folder)).toBe(0);
+            } finally {
+                await dropFolder(folder);
+            }
         });
 
         // ─── MARK() ────────────────────────────────────────────────────────────
@@ -663,35 +926,37 @@ describe('EmailClient Integration Workflows', () => {
         describe('mark() — UNFLAGGED, ARCHIVED, and error cases', () => {
             // One full receive() wait + 2 asserted mark() mutations + clean().
             test('should mark an email as UNFLAGGED', { timeout: budget(1, 0, 1) }, async () => {
-                const uniqueSubject = `Mark UNFLAGGED Test ${Date.now()}`;
+                const uniqueSubject = run.subject('Mark UNFLAGGED Test');
                 const recipient = process.env.RECEIVER_EMAIL!;
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'unflagged test' });
                 await emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                     waitTimeout: TIMEOUT,
                 });
 
                 const filterCriteria = [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }];
 
-                await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria });
+                await emailClient.mark({ action: EmailMarkAction.FLAGGED, filters: filterCriteria, folders: SEARCH_FOLDERS });
 
                 const count = await emailClient.mark({
                     action: EmailMarkAction.UNFLAGGED,
                     filters: filterCriteria,
+                    folders: SEARCH_FOLDERS,
                 });
 
                 expect(count).toBe(1);
 
-                await emailClient.clean({ filters: filterCriteria });
+                await emailClient.clean({ filters: filterCriteria, folders: SEARCH_FOLDERS });
             });
 
-            // Two full waits (receive from INBOX, then receive from the
-            // archive folder), one short wait that is guaranteed to expire,
-            // and an asserted ARCHIVED mark() — a server-side MOVE with no
-            // waitTimeout, so it gets its own mutation allowance.
+            // Two full waits (receive from the search folders, then receive
+            // from the archive folder), one short wait that is guaranteed to
+            // expire, and an asserted ARCHIVED mark() — a server-side MOVE
+            // with no waitTimeout, so it gets its own mutation allowance.
             test('should archive an email by moving it to the archive folder', { timeout: budget(2, 1, 1) }, async () => {
-                const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
+                const uniqueSubject = run.subject('Mark ARCHIVED Test');
                 const recipient = process.env.RECEIVER_EMAIL!;
 
                 const testArchiveFolder = '\\Flagged';
@@ -699,21 +964,24 @@ describe('EmailClient Integration Workflows', () => {
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'archive test' });
                 await emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                     waitTimeout: TIMEOUT,
                 });
 
                 const count = await emailClient.mark({
                     action: EmailMarkAction.ARCHIVED,
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                    folders: SEARCH_FOLDERS,
                     archiveFolder: testArchiveFolder,
                 });
 
                 expect(count).toBe(1);
 
-                // Verify the email is no longer in INBOX
+                // Verify the email is no longer where it was delivered
                 await expect(
                     emailClient.receive({
                         filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        folders: SEARCH_FOLDERS,
                         waitTimeout: SHORT_TIMEOUT,
                         pollInterval: POLLING,
                     })
@@ -737,7 +1005,7 @@ describe('EmailClient Integration Workflows', () => {
             // One full receive() wait. The mark() here rejects on validation
             // before touching the server, so it is not a mutation.
             test('should throw for an unsupported mark action string', { timeout: budget(1) }, async () => {
-                const uniqueSubject = `Mark Bad Action Test ${Date.now()}`;
+                const uniqueSubject = run.subject('Mark Bad Action Test');
                 const recipient = process.env.RECEIVER_EMAIL!;
 
                 await emailClient.send({ to: recipient, subject: uniqueSubject, text: 'bad action' });
@@ -745,6 +1013,7 @@ describe('EmailClient Integration Workflows', () => {
                 try {
                     await emailClient.receive({
                         filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        folders: SEARCH_FOLDERS,
                         waitTimeout: TIMEOUT,
                     });
 
@@ -752,11 +1021,13 @@ describe('EmailClient Integration Workflows', () => {
                         emailClient.mark({
                             action: 'NONEXISTENT_ACTION' as unknown as EmailMarkAction,
                             filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                            folders: SEARCH_FOLDERS,
                         })
                     ).rejects.toThrow(/Unsupported mark action/);
                 } finally {
                     await emailClient.clean({
                         filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
+                        folders: SEARCH_FOLDERS,
                     });
                 }
             });
@@ -764,7 +1035,8 @@ describe('EmailClient Integration Workflows', () => {
             test('should return 0 when mark() finds no matching emails', async () => {
                 const count = await emailClient.mark({
                     action: EmailMarkAction.READ,
-                    filters: [{ type: EmailFilterType.SUBJECT, value: `no-such-email-${Date.now()}` }],
+                    filters: [{ type: EmailFilterType.SUBJECT, value: run.subject('no-such-email') }],
+                    folders: SEARCH_FOLDERS,
                 });
 
                 expect(count).toBe(0);
@@ -865,7 +1137,7 @@ describe('EmailClient Integration Workflows', () => {
                 ].join('\r\n');
 
                 const result = (emailClient as any).extractTextFromSource(rawEmailSource);
-                expect(result).toContain('caf\u00e9 from quoted-printable');
+                expect(result).toContain('café from quoted-printable');
             });
 
             test('should return empty string when the requested content-type is absent', () => {
