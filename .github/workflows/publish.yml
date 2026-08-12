@@ -12,19 +12,26 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # The live SMTP/IMAP suite runs here. Without an explicit bound a genuine
-    # hang inherits GitHub's 360-minute default and burns six hours of runner
-    # time before anyone sees a red build.
+    # The live SMTP/IMAP suite runs here, so this job is exposed to the mail
+    # provider's latency. Without an explicit bound a genuine hang inherits
+    # GitHub's 360-minute default and burns six hours of runner time before
+    # anyone sees a red build.
     #
-    # Sizing: a passing test returns as soon as the mail lands, so the doubled
-    # per-test waits do not slow a good run — the last full run took ~16
-    # minutes. The cost only appears on slow or failing tests, each of which
-    # can now burn up to 240s instead of 120s. 90 minutes covers a normal run
-    # plus roughly ten fully-expired long waits. It is deliberately NOT sized
-    # to the pathological ceiling (every one of the 34 tests burning its whole
-    # budget is ~3.5 hours) — a run like that is a genuine hang and should be
-    # killed. A bound that kills a legitimately slow-but-passing run would
-    # just recreate the failure this PR fixes, wearing a hang's clothes.
+    # Deriving 90 from measurements rather than taste:
+    #   * observed full live run, before the budgets were doubled: 1166s
+    #     (~19.4 min), on a slow day for the provider;
+    #   * doubling the waits does NOT slow a passing test — it returns as soon
+    #     as the mail lands — so a good run stays in that range;
+    #   * a genuinely slow-but-passing day at roughly twice that pace is
+    #     ~40 min, plus ~2 min of install and build;
+    #   * a legitimately slow test can now sit near its own budget: the
+    #     clean-verify test alone is allowed ~9.25 min, the archive test
+    #     ~14.25 min. Two or three of those on one run fit inside 90.
+    # 90 is therefore comfortably above the worst plausible PASSING run while
+    # still roughly a third of the pathological ceiling (every test burning its
+    # full budget is ~4.3 hours) — that shape is a hang and should be killed. A
+    # bound that kills a slow-but-passing run would just recreate the failure
+    # this PR fixes, wearing a hang's clothes.
     timeout-minutes: 90
 
     steps:
