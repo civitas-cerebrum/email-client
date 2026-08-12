@@ -25,11 +25,11 @@ jobs:
     #   * a genuinely slow-but-passing day at roughly twice that pace is
     #     ~40 min, plus ~2 min of install and build;
     #   * a legitimately slow test can now sit near its own budget: the
-    #     clean-verify test alone is allowed ~8.25 min, the archive test
-    #     ~12 min. Two or three of those on one run fit inside 90.
+    #     clean-verify test alone is allowed ~9.25 min, the archive test
+    #     ~14.25 min. Two or three of those on one run fit inside 90.
     # 90 is therefore comfortably above the worst plausible PASSING run while
-    # still a quarter of the pathological ceiling (every test burning its full
-    # budget is ~3.7 hours) — that shape is a hang and should be killed. A
+    # still roughly a third of the pathological ceiling (every test burning its
+    # full budget is ~4.3 hours) — that shape is a hang and should be killed. A
     # bound that kills a slow-but-passing run would just recreate the failure
     # this PR fixes, wearing a hang's clothes.
     timeout-minutes: 90
