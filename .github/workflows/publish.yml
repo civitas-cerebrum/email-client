@@ -12,6 +12,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The live SMTP/IMAP suite runs here. Without an explicit bound a genuine
+    # hang inherits GitHub's 360-minute default and burns six hours of runner
+    # time before anyone sees a red build. The full suite (unit + 34 live
+    # integration tests) has been landing in ~16 minutes; 45 leaves room for a
+    # slow mail day while still failing fast on a real hang.
+    timeout-minutes: 45
 
     steps:
       - name: 🗂️ Checkout repository

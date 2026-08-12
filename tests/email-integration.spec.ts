@@ -33,14 +33,52 @@ async function getImapFlags(subject: string): Promise<Set<string>[]> {
 
 describe('EmailClient Integration Workflows', () => {
     let emailClient: EmailClient;
+
+    // ── Timeout model ────────────────────────────────────────────────────
+    // Invariant: a test's vitest budget must ALWAYS exceed the sum of the
+    // internal client waits it can spend, with margin for the non-waiting
+    // work around them.
+    //
+    // `receive()` / `receiveAll()` poll until `Date.now() + waitTimeout` and
+    // only then throw the diagnostic "Found 0/N emails within Nms" error, so
+    // an unlucky-but-legitimate slow delivery consumes the ENTIRE wait budget
+    // before a single assertion runs. If the vitest budget equals the wait
+    // budget, vitest kills the test at the same instant — the test cannot
+    // pass except by luck and the useful error is never surfaced.
+    //
+    // Every test below therefore declares `{ timeout: budget(...) }` counting
+    // the waits it can actually spend on its worst path. The global default
+    // in vitest.config.ts is budget(1), so a test that forgets to declare one
+    // still gets a full wait plus margin.
+
+    /** Standard wait for a real email to arrive and be matched. */
     const TIMEOUT = 120000;
+    /** Negative-path wait — used where the wait is EXPECTED to expire. */
+    const SHORT_TIMEOUT = 15000;
+    /** Poll interval for the mailbox polling loop. */
     const POLLING = 5000;
+    /**
+     * Margin over the waits themselves: SMTP send, IMAP connect/logout per
+     * call, mark/clean round-trips, and the fact that `_pollMailbox` checks
+     * its deadline at the top of the loop and can therefore overrun by one
+     * fetch cycle.
+     */
+    const OVERHEAD = 60000;
+
+    /**
+     * Vitest budget for a test that can spend `longWaits` full waits and
+     * `shortWaits` expiring short waits, plus `extra` ms of measured tail
+     * work that OVERHEAD does not cover.
+     */
+    const budget = (longWaits: number, shortWaits = 0, extra = 0): number =>
+        longWaits * TIMEOUT + shortWaits * SHORT_TIMEOUT + OVERHEAD + extra;
 
     beforeAll(async () => {
         emailClient = await import('../src/fixtures').then(m => m.setupGlobalEmailClient());
     });
 
-    test('should send, receive, and clean a plain text email (Exact Match)', async () => {
+    // One full receive() wait.
+    test('should send, receive, and clean a plain text email (Exact Match)', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Test OTP Code ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -67,7 +105,8 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test('should successfully send and verify an HTML formatted email', async () => {
+    // One full receive() wait.
+    test('should successfully send and verify an HTML formatted email', { timeout: budget(1) }, async () => {
         const uniqueSubject = `HTML Content Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
         const expectedHtml = '<h1 style="color: blue;">Welcome to Civitas!</h1><p>Your journey begins here.</p>';
@@ -92,7 +131,8 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test('should fetch multiple emails using receiveAll', { timeout: 180000 }, async () => {
+    // One full receiveAll() wait (3 parallel sends + clean sit inside OVERHEAD).
+    test('should fetch multiple emails using receiveAll', { timeout: budget(1) }, async () => {
         const batchId = `BatchTest-${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -121,7 +161,8 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test('should match emails using the CONTENT filter', async () => {
+    // One full receive() wait.
+    test('should match emails using the CONTENT filter', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Content Filter Test ${Date.now()}`;
         const uniqueSecret = `SECRET_KEY_${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -147,8 +188,9 @@ describe('EmailClient Integration Workflows', () => {
         });
     });
 
-    test('should throw a timeout error if no email matches the criteria', async () => {
-        const shortTimeout = 15000;
+    // One short wait that is expected to expire.
+    test('should throw a timeout error if no email matches the criteria', { timeout: budget(0, 1) }, async () => {
+        const shortTimeout = SHORT_TIMEOUT;
         const impossibleSubject = `This email will never exist ${Date.now()}`;
 
         await expect(
@@ -160,7 +202,8 @@ describe('EmailClient Integration Workflows', () => {
         ).rejects.toThrow(new RegExp(`within ${shortTimeout}ms`));
     });
 
-    test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', async () => {
+    // One full receiveAll() wait.
+    test('should apply filters client-side to a batch of fetched emails (applyFilters E2E)', { timeout: budget(1) }, async () => {
         const batchId = `ClientFilterTest-${Date.now()}`;
         const uniqueToken = `XTOKEN_${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
@@ -214,7 +257,8 @@ describe('EmailClient Integration Workflows', () => {
         expect(extractedText).toContain('Fallback text content');
     });
 
-    test('should successfully apply standard IMAP flags (READ, UNREAD, FLAGGED) using mark()', async () => {
+    // One full receive() wait + 3 mark() round-trips + clean().
+    test('should successfully apply standard IMAP flags (READ, UNREAD, FLAGGED) using mark()', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Mark Standard Flags Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -252,7 +296,12 @@ describe('EmailClient Integration Workflows', () => {
         await emailClient.clean({ filters: filterCriteria });
     });
 
-    test('should verify mark() actually modifies the correct email flags on the server', { timeout: 180000 }, async () => {
+    // One full receive() wait, then a long serial tail: 4 mark() round-trips
+    // interleaved with 4 getImapFlags() calls that each open, search, fetch
+    // and log out of their own IMAP connection, plus clean(). This tail is
+    // what exhausted the previous 180000 budget in CI, so it gets a full
+    // extra wait's worth of headroom rather than OVERHEAD alone.
+    test('should verify mark() actually modifies the correct email flags on the server', { timeout: budget(1, 0, TIMEOUT) }, async () => {
         const uniqueSubject = `Mark Verify Flags ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -297,7 +346,8 @@ describe('EmailClient Integration Workflows', () => {
         await emailClient.clean({ filters: filterCriteria });
     });
 
-    test('should apply custom IMAP string flags using mark()', async () => {
+    // One full receive() wait.
+    test('should apply custom IMAP string flags using mark()', { timeout: budget(1) }, async () => {
         const uniqueSubject = `Mark Custom Flags Test ${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -326,7 +376,10 @@ describe('EmailClient Integration Workflows', () => {
 
     // ─── RECEIVE() LATEST EMAIL ──────────────────────────────────────────
 
-    test('receive() should return the most recent email when multiple match', async () => {
+    // Worst path is three full waits: receiveAll(INBOX) can expire, the
+    // .catch fallback then spends a second full receiveAll wait on Spam, and
+    // receive() spends a third.
+    test('receive() should return the most recent email when multiple match', { timeout: budget(3) }, async () => {
         const batchId = `LatestEmailTest-${Date.now()}`;
         const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -391,7 +444,8 @@ describe('EmailClient Integration Workflows', () => {
     // ─── SEND() ────────────────────────────────────────────────────────────
 
     describe('send()', () => {
-        test('should load and send HTML content from a local file (htmlFile option)', async () => {
+        // One full receive() wait.
+        test('should load and send HTML content from a local file (htmlFile option)', { timeout: budget(1) }, async () => {
             const uniqueSubject = `HtmlFile Send Test ${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -434,8 +488,9 @@ describe('EmailClient Integration Workflows', () => {
     // ─── RECEIVEALL() TIMEOUT ──────────────────────────────────────────────
 
     describe('receiveAll()', () => {
-        test('should throw a timeout error when no emails match within the deadline', async () => {
-            const shortTimeout = 15000;
+        // One short wait that is expected to expire.
+        test('should throw a timeout error when no emails match within the deadline', { timeout: budget(0, 1) }, async () => {
+            const shortTimeout = SHORT_TIMEOUT;
             const impossibleSubject = `receiveAll-never-exists-${Date.now()}`;
 
             await expect(
@@ -490,7 +545,10 @@ describe('EmailClient Integration Workflows', () => {
             ).rejects.toThrow(/Failed to open folder "Trash"/i);
         });
 
-        test('should verify emails are permanently removed after clean()', async () => {
+        // One full receive() wait, then clean(), then a short wait that is
+        // expected to expire proving the email is gone. 120000 + 15000 alone
+        // already exceeded the old 120000 global budget.
+        test('should verify emails are permanently removed after clean()', { timeout: budget(1, 1) }, async () => {
             const uniqueSubject = `CleanVerify-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -511,13 +569,15 @@ describe('EmailClient Integration Workflows', () => {
             await expect(
                 emailClient.receive({
                     filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                    waitTimeout: 15000,
+                    waitTimeout: SHORT_TIMEOUT,
                     pollInterval: POLLING,
                 })
-            ).rejects.toThrow(/within 15000ms/);
+            ).rejects.toThrow(new RegExp(`within ${SHORT_TIMEOUT}ms`));
         });
 
-        test('should delete ALL emails in INBOX when called with no options', async () => {
+        // One full receiveAll() wait plus an unbounded clean() over the whole
+        // INBOX — the delete set is not fixed by the test, so it gets extra.
+        test('should delete ALL emails in INBOX when called with no options', { timeout: budget(1, 0, 60000) }, async () => {
             const batchId = `CleanAll-${Date.now()}`;
             const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -542,7 +602,8 @@ describe('EmailClient Integration Workflows', () => {
         // ─── MARK() ────────────────────────────────────────────────────────────
 
         describe('mark() — UNFLAGGED, ARCHIVED, and error cases', () => {
-            test('should mark an email as UNFLAGGED', async () => {
+            // One full receive() wait + 2 mark() round-trips + clean().
+            test('should mark an email as UNFLAGGED', { timeout: budget(1) }, async () => {
                 const uniqueSubject = `Mark UNFLAGGED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -566,7 +627,9 @@ describe('EmailClient Integration Workflows', () => {
                 await emailClient.clean({ filters: filterCriteria });
             });
 
-            test('should archive an email by moving it to the archive folder', async () => {
+            // Two full waits (receive from INBOX, then receive from the
+            // archive folder) plus one short wait that is expected to expire.
+            test('should archive an email by moving it to the archive folder', { timeout: budget(2, 1) }, async () => {
                 const uniqueSubject = `Mark ARCHIVED Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
@@ -590,10 +653,10 @@ describe('EmailClient Integration Workflows', () => {
                 await expect(
                     emailClient.receive({
                         filters: [{ type: EmailFilterType.SUBJECT, value: uniqueSubject }],
-                        waitTimeout: 15000,
+                        waitTimeout: SHORT_TIMEOUT,
                         pollInterval: POLLING,
                     })
-                ).rejects.toThrow(/within 15000ms/);
+                ).rejects.toThrow(new RegExp(`within ${SHORT_TIMEOUT}ms`));
 
                 // Verify the email arrived in the archive folder
                 const archived = await emailClient.receive({
@@ -610,7 +673,8 @@ describe('EmailClient Integration Workflows', () => {
                 });
             });
 
-            test('should throw for an unsupported mark action string', async () => {
+            // One full receive() wait.
+            test('should throw for an unsupported mark action string', { timeout: budget(1) }, async () => {
                 const uniqueSubject = `Mark Bad Action Test ${Date.now()}`;
                 const recipient = process.env.RECEIVER_EMAIL!;
 
