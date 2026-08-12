@@ -26,12 +26,13 @@
   ],
   "dependencies": {
     "debug": "^4.4.3",
-    "imapflow": "^1.3.1",
-    "mailparser": "^3.9.8",
+    "imapflow": "^1.3.4",
+    "mailparser": "^3.9.13",
     "nodemailer": "^9.0.1"
   },
   "overrides": {
-    "nodemailer": "^9.0.1"
+    "nodemailer": "^9.0.1",
+    "ip-address": ">=10.3.1"
   },
   "devDependencies": {
     "@civitas-cerebrum/test-coverage": "^0.0.8",
