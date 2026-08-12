@@ -64,8 +64,17 @@ describe('EmailClient Integration Workflows', () => {
     /**
      * Standard wait for a real email to arrive and be matched. Sized for the
      * free-tier provider's delivery latency, not for the library.
+     *
+     * 300000 after a run in which a send was still not visible over IMAP
+     * 240000ms later ("Found 0/1 emails within 240000ms"). Note what that
+     * error means: the budget model is working — the wait ran to exhaustion
+     * and produced its diagnostic instead of being killed by vitest — so a
+     * failure at this line is a DELIVERY problem, not a budget one. Before
+     * raising this number again, check whether the message arrived at all
+     * (a free-tier sender's mail landing in the receiver's spam folder is
+     * never found by an INBOX-only search, at any timeout).
      */
-    const TIMEOUT = 240000;
+    const TIMEOUT = 300000;
     /**
      * Negative-path wait — used ONLY where the wait is EXPECTED to expire
      * (proving an email is absent). Deliberately not scaled with TIMEOUT:
