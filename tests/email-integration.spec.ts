@@ -326,6 +326,20 @@ describe('EmailClient Integration Workflows', { retry: LIVE_RETRIES }, () => {
     // accumulating mailbox slowly inflates the delivery waits that the whole
     // budget model is sized around. It also picks up the orphans a failed
     // attempt left behind before its own trailing clean() could run.
+    //
+    // THIS HOOK NEEDS ITS OWN BUDGET, AND IT IS NOT THE GLOBAL `hookTimeout`.
+    // The `clean()` below is an unbounded server-side mutation over every
+    // folder in SEARCH_FOLDERS — exactly the term the budget model prices at
+    // MUTATION, plus OVERHEAD for the per-folder IMAP connect/expunge
+    // round-trips. `hookTimeout` in vitest.config.ts is 60000 and is sized for
+    // `beforeAll`, which does no network I/O; inheriting it here capped a
+    // provider-driven delete at 60s. That is not hypothetical — it is the
+    // failure this timeout fixes: a scheduled run finished all 34 tests green
+    // and then failed the SUITE with "Hook timed out in 60000ms", having spent
+    // 21s-257s on comparable clean() calls inside the tests themselves.
+    //
+    // Cleanup failure is already swallowed below on purpose, so the only thing
+    // a too-small timeout can do is turn a tidy-up into a red run.
     afterAll(async () => {
         if (!emailClient) return;
         try {
@@ -337,7 +351,7 @@ describe('EmailClient Integration Workflows', { retry: LIVE_RETRIES }, () => {
         } catch (err) {
             console.warn(`🧹 Run-scoped cleanup for ${run.tag} failed (ignored): %o`, err);
         }
-    });
+    }, budget(0, 0, 1));
 
     // One full receive() wait. The trailing clean() needs no allowance: it
     // runs after the last assertion and is the single cleanup OVERHEAD covers.
