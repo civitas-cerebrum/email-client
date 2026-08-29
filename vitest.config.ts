@@ -41,9 +41,17 @@ export default defineConfig({
     // beforeAll builds the live client (env validation + construction) and
     // is the shared gate for all 34 integration tests — if it blows, every
     // one of them fails together. 10s left no room for a slow install/import
-    // or for any future hook that opens a real SMTP/IMAP handshake. The hook
-    // does no network I/O today, so this does not need to scale with the
+    // or for any future hook that opens a real SMTP/IMAP handshake. That
+    // hook does no network I/O, so this does not need to scale with the
     // provider-driven test budgets.
+    //
+    // A HOOK THAT DOES TALK TO THE PROVIDER MUST DECLARE ITS OWN TIMEOUT and
+    // must not lean on this number. The live suite's run-scoped `afterAll`
+    // cleanup learned that the hard way: it issues an unbounded `clean()`
+    // across every search folder, inherited this 60000, and failed a run whose
+    // 34 tests had all passed. It now passes `budget(0, 0, 1)` explicitly.
+    // Raise that hook's own budget, not this one — widening this would also
+    // loosen the beforeAll gate, which is deliberately tight.
     hookTimeout: 60000,
 
     // NO GLOBAL `retry`. Retrying is only sound when every attempt is
